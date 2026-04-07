@@ -41,7 +41,14 @@ cp .env.example .env
 
 ### Default Login Credentials
 
-The seed admin account is created on first startup. Credentials are configured via the `ADMIN_PASSWORD` environment variable (see `.env.example`). Do **not** expose default credentials in production — change them immediately after first login.
+The seed admin account is created automatically by database migration `000001_init.up.sql`. The default credentials are:
+
+| Field    | Value          |
+|----------|----------------|
+| Username | `admin`        |
+| Password | `AdminPass1234`|
+
+**Change the admin password immediately after first login.** No `ADMIN_PASSWORD` environment variable is required — the seed hash is embedded in the migration file.
 
 ### Running the Application
 
@@ -254,6 +261,23 @@ npm run electron:dev
 | `frontend/dist-installer/MedOps Console *.msi` | MSI for enterprise deployment (Group Policy) |
 
 PostgreSQL is bundled automatically via embedded-postgres — no separate installation is required.
+
+## Security & Tenant Isolation Model
+
+All primary business tables (`auth_users`, `members`, `skus`, `work_orders`, `knowledge_points`, `member_transactions`, `rate_tables`, `charge_statements`, `managed_files`, `stocktakes`, `stock_transactions`, `learning_subjects`, `learning_chapters`) carry a `tenant_id` column. Every repository query enforces `WHERE tenant_id = $N` or includes it in INSERT values.
+
+**Intentionally global (no tenant_id) tables:**
+
+| Table | Rationale |
+|-------|-----------|
+| `membership_tiers` | Shared platform catalogue (Gold, Silver, etc.) — no PHI, same definitions across all tenants. Isolation is enforced at the member record level via `members.tenant_id`. |
+| `draft_checkpoints` | Scoped by `user_id` (users belong to a tenant, so isolation is transitive). |
+| `charge_line_items` | Scoped via FK to `charge_statements.tenant_id`. |
+| `work_order_photos` | Scoped via FK to `work_orders.tenant_id`. |
+| `system_config` | Single deployment-wide config; no tenant-specific data stored here. |
+| `inventory_batches` | Scoped via FK to `skus.tenant_id`. |
+| `stocktake_lines` | Scoped via FK to `stocktakes.tenant_id`. |
+| `session_packages` | Scoped via FK to `members.tenant_id`. |
 
 ## Architecture
 

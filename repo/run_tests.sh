@@ -119,14 +119,14 @@ fi
 # Re-login after logout test
 LOGIN_RES2=$(curl -sf -X POST "${API_URL}/auth/login" \
     -H "Content-Type: application/json" \
-    -d '{"username":"admin","password":"Admin123!"}')
+    -d '{"username":"admin","password":"AdminPass1234"}')
 TOKEN=$(echo "$LOGIN_RES2" | jq -r '.token')
 AUTH_HEADER="Authorization: Bearer $TOKEN"
 
 # Password change returns 204 No Content
 PWCHANGE_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "${API_URL}/auth/password" \
     -H "$AUTH_HEADER" -H "Content-Type: application/json" \
-    -d '{"current_password":"Admin123!","new_password":"Admin123!New"}')
+    -d '{"old_password":"AdminPass1234","new_password":"AdminPass1234New"}')
 if [ "$PWCHANGE_CODE" -eq 204 ]; then
     pass "Password change returns 204 No Content"
 else
@@ -136,14 +136,14 @@ fi
 # Re-login with new password, then immediately restore original password
 LOGIN_RES3=$(curl -sf -X POST "${API_URL}/auth/login" \
     -H "Content-Type: application/json" \
-    -d '{"username":"admin","password":"Admin123!New"}')
+    -d '{"username":"admin","password":"AdminPass1234New"}')
 TOKEN=$(echo "$LOGIN_RES3" | jq -r '.token')
 AUTH_HEADER="Authorization: Bearer $TOKEN"
 
 # Restore original password so subsequent tests and re-runs use a known credential
 PWRESTORE_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "${API_URL}/auth/password" \
     -H "$AUTH_HEADER" -H "Content-Type: application/json" \
-    -d '{"current_password":"Admin123!New","new_password":"Admin123!"}')
+    -d '{"old_password":"AdminPass1234New","new_password":"AdminPass1234"}')
 if [ "$PWRESTORE_CODE" -eq 204 ]; then
     pass "Admin password restored to original"
 else
@@ -153,7 +153,7 @@ fi
 # Re-login with restored original password
 LOGIN_RES4=$(curl -sf -X POST "${API_URL}/auth/login" \
     -H "Content-Type: application/json" \
-    -d '{"username":"admin","password":"Admin123!"}')
+    -d '{"username":"admin","password":"AdminPass1234"}')
 TOKEN=$(echo "$LOGIN_RES4" | jq -r '.token')
 AUTH_HEADER="Authorization: Bearer $TOKEN"
 
@@ -560,6 +560,28 @@ if [ -n "$STMT_ID" ]; then
     pass "Generate charge statement"
 else
     fail "Generate charge statement" "$GEN_STMT"
+fi
+
+# ---- System Config ----
+echo ""
+echo "--- System Configuration ---"
+
+# GET /system/config must return { "config": { ... } }
+CFG_RES=$(curl -sf "${API_URL}/system/config" -H "$AUTH_HEADER")
+if echo "$CFG_RES" | jq -e '.config' > /dev/null 2>&1; then
+    pass "GET /system/config returns { config: {...} } shape"
+else
+    fail "GET /system/config shape" "Expected .config key, got: $CFG_RES"
+fi
+
+# PUT /system/config with { key, value } must succeed
+CFG_UPDATE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "${API_URL}/system/config" \
+    -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+    -d '{"key":"test_key","value":"test_value"}')
+if [ "$CFG_UPDATE" -eq 200 ]; then
+    pass "PUT /system/config with { key, value } returns 200"
+else
+    fail "PUT /system/config" "Expected 200, got $CFG_UPDATE"
 fi
 
 # ---- 404 ----

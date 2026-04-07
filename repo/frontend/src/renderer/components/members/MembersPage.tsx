@@ -2,6 +2,7 @@ import React, { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { membersAPI } from '../../services/api';
 import { useFetch } from '../../hooks/useFetch';
+import { useDraftAutoSave } from '../../hooks/useDraftAutoSave';
 import type { Member, MembershipTier, PaginatedResponse } from '../../types';
 import LoadingSpinner from '../common/LoadingSpinner';
 import ErrorMessage from '../common/ErrorMessage';
@@ -54,6 +55,8 @@ const MembersPage: React.FC = () => {
   const [createSubmitting, setCreateSubmitting] = useState(false);
   const [createSuccess, setCreateSuccess] = useState('');
 
+  const { clearDraft: clearMemberDraft } = useDraftAutoSave('member_create', null, createForm);
+
   // Context menu
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; member: Member } | null>(null);
 
@@ -74,6 +77,7 @@ const MembersPage: React.FC = () => {
         phone: createForm.phone.trim(),
         tier_id: createForm.tier_id,
       });
+      clearMemberDraft();
       setCreateSuccess('Member created successfully');
       setShowCreate(false);
       setCreateForm({ name: '', id_number: '', phone: '', tier_id: '' });

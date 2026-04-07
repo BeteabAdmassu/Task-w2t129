@@ -11,6 +11,7 @@ import {
   shell,
   nativeImage,
   session,
+  Notification,
 } from 'electron';
 import { join } from 'path';
 import { existsSync } from 'fs';
@@ -190,8 +191,8 @@ function createAppIcon(): Electron.NativeImage {
 function createWindow(options: { url?: string; title?: string } = {}): BrowserWindow {
   const icon = createAppIcon();
   const win = new BrowserWindow({
-    width: 1280,
-    height: 800,
+    width: 1920,
+    height: 1080,
     minWidth: 960,
     minHeight: 600,
     title: options.title ?? 'MedOps Offline Operations Console',
@@ -273,6 +274,14 @@ function registerIPC(): void {
 }
 
 // ─── App lifecycle ────────────────────────────────────────────────────────────
+
+// Enable high-DPI (HiDPI / Retina) awareness on all platforms.
+// 'high-dpi-support' tells Chromium to honour the OS DPI scaling factor.
+// We intentionally do NOT set 'force-device-scale-factor' — that overrides
+// the OS setting and would cause blurry rendering on non-96-DPI displays
+// (e.g. 150% scaling on 2K monitors). Let the OS scale factor pass through.
+// Must be called before app is ready.
+app.commandLine.appendSwitch('high-dpi-support', '1');
 
 app.whenReady().then(async () => {
   // Security: block navigation to unexpected origins

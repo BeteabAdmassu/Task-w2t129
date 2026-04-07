@@ -15,6 +15,7 @@ import MembersPage from './components/members/MembersPage';
 import MemberDetailPage from './components/members/MemberDetailPage';
 import RateTablesPage from './components/charges/RateTablesPage';
 import StatementsPage from './components/charges/StatementsPage';
+import SystemConfigPage from './components/admin/SystemConfigPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuth();
@@ -51,7 +52,7 @@ export default function App() {
         <Route path="/members/:id" element={<RoleRoute roles={['system_admin', 'front_desk']}><MemberDetailPage /></RoleRoute>} />
         <Route path="/rate-tables" element={<RoleRoute roles={['system_admin']}><RateTablesPage /></RoleRoute>} />
         <Route path="/statements" element={<RoleRoute roles={['system_admin']}><StatementsPage /></RoleRoute>} />
-        <Route path="/system-config" element={<RoleRoute roles={['system_admin']}><DashboardPage /></RoleRoute>} />
+        <Route path="/system-config" element={<RoleRoute roles={['system_admin']}><SystemConfigPage /></RoleRoute>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

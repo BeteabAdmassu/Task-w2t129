@@ -24,6 +24,8 @@ type workOrderStore interface {
 	UpdateWorkOrder(wo *models.WorkOrder) error
 	GetTechWithLeastOrders(trade string) (string, error)
 	GetWorkOrderAnalytics() (map[string]interface{}, error)
+	LinkPhotoToWorkOrder(workOrderID, fileID string) (*models.WorkOrderPhoto, error)
+	GetWorkOrderPhotos(workOrderID string) ([]models.ManagedFile, error)
 	CreateAuditLog(entry *models.AuditLogEntry) error
 }
 

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { chargesAPI } from '../../services/api';
+import { useDraftAutoSave } from '../../hooks/useDraftAutoSave';
 import type { ChargeStatement, ChargeLineItem, User } from '../../types';
 import LoadingSpinner from '../common/LoadingSpinner';
 import ErrorMessage from '../common/ErrorMessage';
@@ -70,6 +71,8 @@ const StatementsPage: React.FC = () => {
   const [genSubmitting, setGenSubmitting] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
 
+  const { clearDraft: clearGenDraft } = useDraftAutoSave('statement_generate', null, genForm);
+
   // Detail / expanded view
   const [selectedStatement, setSelectedStatement] = useState<ChargeStatement | null>(null);
   const [lineItems, setLineItems] = useState<ChargeLineItem[]>([]);
@@ -99,6 +102,7 @@ const StatementsPage: React.FC = () => {
     setGenErr('');
     try {
       await chargesAPI.generateStatement({ period_start: genForm.period_start, period_end: genForm.period_end });
+      clearGenDraft();
       showSuccess('Statement generated successfully');
       setShowGenerate(false);
       setGenForm({ period_start: '', period_end: '' });
@@ -169,13 +173,14 @@ const StatementsPage: React.FC = () => {
   };
 
   // Approve (reconciled → approved), only if different user from reconciler
-  const handleApprove = async () => {
-    if (!selectedStatement) return;
+  const handleApprove = async (overrideId?: string) => {
+    const id = overrideId ?? selectedStatement?.id;
+    if (!id) return;
     setActionLoading(true);
     try {
-      await chargesAPI.approve(selectedStatement.id);
+      await chargesAPI.approve(id);
       showSuccess('Statement approved');
-      const r = await chargesAPI.getStatement(selectedStatement.id);
+      const r = await chargesAPI.getStatement(id);
       const d = r.data;
       setSelectedStatement(d.statement || d);
       fetchStatements();
@@ -187,19 +192,20 @@ const StatementsPage: React.FC = () => {
   };
 
   // Export CSV (approved → paid)
-  const handleExport = async () => {
-    if (!selectedStatement) return;
+  const handleExport = async (overrideId?: string) => {
+    const id = overrideId ?? selectedStatement?.id;
+    if (!id) return;
     setActionLoading(true);
     try {
-      const r = await chargesAPI.exportStatement(selectedStatement.id, 'csv');
+      const r = await chargesAPI.exportStatement(id, 'csv');
       const url = window.URL.createObjectURL(new Blob([r.data]));
       const a = document.createElement('a');
       a.href = url;
-      a.download = `statement-${selectedStatement.id.slice(0, 8)}.csv`;
+      a.download = `statement-${id.slice(0, 8)}.csv`;
       a.click();
       window.URL.revokeObjectURL(url);
       showSuccess('Statement exported — status updated to paid');
-      const r2 = await chargesAPI.getStatement(selectedStatement.id);
+      const r2 = await chargesAPI.getStatement(id);
       const d = r2.data;
       setSelectedStatement(d.statement || d);
       fetchStatements();
@@ -328,7 +334,7 @@ const StatementsPage: React.FC = () => {
                 )}
                 {/* Approve: only available from reconciled, and only if the current user is not the reconciler */}
                 {selectedStatement.status === 'reconciled' && currentUser && selectedStatement.approved_by_1 !== currentUser.id && (
-                  <button onClick={handleApprove} style={btnPrimary} disabled={actionLoading}>
+                  <button onClick={() => handleApprove()} style={btnPrimary} disabled={actionLoading}>
                     {actionLoading ? 'Approving...' : 'Approve'}
                   </button>
                 )}
@@ -337,7 +343,7 @@ const StatementsPage: React.FC = () => {
                 )}
                 {/* Export CSV: only available from approved */}
                 {selectedStatement.status === 'approved' && (
-                  <button onClick={handleExport} style={btnPrimary} disabled={actionLoading}>
+                  <button onClick={() => handleExport()} style={btnPrimary} disabled={actionLoading}>
                     {actionLoading ? 'Exporting...' : 'Export CSV'}
                   </button>
                 )}

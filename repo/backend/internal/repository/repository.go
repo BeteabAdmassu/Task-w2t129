@@ -83,7 +83,7 @@ func (r *Repository) GetUserByUsername(username string) (*models.User, error) {
 	u := &models.User{}
 	err := r.DB.QueryRow(
 		`SELECT id, username, password_hash, role, failed_attempts, locked_until, is_active, created_at, updated_at
-		 FROM auth_users WHERE username = $1`, username,
+		 FROM auth_users WHERE username = $1 AND tenant_id = $2`, username, r.tenantID,
 	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.FailedAttempts, &u.LockedUntil, &u.IsActive, &u.CreatedAt, &u.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -119,9 +119,9 @@ func (r *Repository) CreateUser(user *models.User) error {
 	user.CreatedAt = now
 	user.UpdatedAt = now
 	_, err := r.DB.Exec(
-		`INSERT INTO auth_users (id, username, password_hash, role, failed_attempts, locked_until, is_active, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		user.ID, user.Username, user.PasswordHash, user.Role, user.FailedAttempts, user.LockedUntil, user.IsActive, user.CreatedAt, user.UpdatedAt,
+		`INSERT INTO auth_users (id, username, password_hash, role, failed_attempts, locked_until, is_active, created_at, updated_at, tenant_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		user.ID, user.Username, user.PasswordHash, user.Role, user.FailedAttempts, user.LockedUntil, user.IsActive, user.CreatedAt, user.UpdatedAt, r.tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("create user: %w", err)
@@ -167,7 +167,7 @@ func (r *Repository) ListUsers() ([]models.User, error) {
 // IncrementFailedAttempts increments the failed login attempts counter.
 func (r *Repository) IncrementFailedAttempts(userID string) error {
 	_, err := r.DB.Exec(
-		`UPDATE auth_users SET failed_attempts = failed_attempts + 1, updated_at = NOW() WHERE id = $1`, userID,
+		`UPDATE auth_users SET failed_attempts = failed_attempts + 1, updated_at = NOW() WHERE id = $1 AND tenant_id = $2`, userID, r.tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("increment failed attempts: %w", err)
@@ -179,7 +179,7 @@ func (r *Repository) IncrementFailedAttempts(userID string) error {
 func (r *Repository) LockUser(userID string, minutes int) error {
 	until := time.Now().Add(time.Duration(minutes) * time.Minute)
 	_, err := r.DB.Exec(
-		`UPDATE auth_users SET locked_until = $1, updated_at = NOW() WHERE id = $2`, until, userID,
+		`UPDATE auth_users SET locked_until = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3`, until, userID, r.tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("lock user: %w", err)
@@ -190,7 +190,7 @@ func (r *Repository) LockUser(userID string, minutes int) error {
 // UnlockUser removes the lock on a user account and resets failed attempts.
 func (r *Repository) UnlockUser(userID string) error {
 	_, err := r.DB.Exec(
-		`UPDATE auth_users SET locked_until = NULL, failed_attempts = 0, updated_at = NOW() WHERE id = $1`, userID,
+		`UPDATE auth_users SET locked_until = NULL, failed_attempts = 0, updated_at = NOW() WHERE id = $1 AND tenant_id = $2`, userID, r.tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("unlock user: %w", err)
@@ -201,7 +201,7 @@ func (r *Repository) UnlockUser(userID string) error {
 // ResetFailedAttempts resets the failed login attempts counter to zero.
 func (r *Repository) ResetFailedAttempts(userID string) error {
 	_, err := r.DB.Exec(
-		`UPDATE auth_users SET failed_attempts = 0, updated_at = NOW() WHERE id = $1`, userID,
+		`UPDATE auth_users SET failed_attempts = 0, updated_at = NOW() WHERE id = $1 AND tenant_id = $2`, userID, r.tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("reset failed attempts: %w", err)
@@ -310,8 +310,8 @@ func (r *Repository) CreateSKU(sku *models.SKU) error {
 func (r *Repository) UpdateSKU(sku *models.SKU) error {
 	_, err := r.DB.Exec(
 		`UPDATE skus SET ndc=$1, upc=$2, name=$3, description=$4, unit_of_measure=$5, low_stock_threshold=$6, storage_location=$7, is_active=$8
-		 WHERE id=$9`,
-		sku.NDC, sku.UPC, sku.Name, sku.Description, sku.UnitOfMeasure, sku.LowStockThreshold, sku.StorageLocation, sku.IsActive, sku.ID,
+		 WHERE id=$9 AND tenant_id=$10`,
+		sku.NDC, sku.UPC, sku.Name, sku.Description, sku.UnitOfMeasure, sku.LowStockThreshold, sku.StorageLocation, sku.IsActive, sku.ID, r.tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("update sku: %w", err)
@@ -325,8 +325,9 @@ func (r *Repository) GetLowStockSKUs() ([]models.SKU, error) {
 		`SELECT s.id, s.ndc, s.upc, s.name, s.description, s.unit_of_measure, s.low_stock_threshold, s.storage_location, s.is_active, s.created_at
 		 FROM skus s
 		 WHERE s.is_active = true
+		   AND s.tenant_id = $1
 		   AND (SELECT COALESCE(SUM(b.quantity_on_hand), 0) FROM inventory_batches b WHERE b.sku_id = s.id) < s.low_stock_threshold
-		 ORDER BY s.name`,
+		 ORDER BY s.name`, r.tenantID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get low stock skus: %w", err)
@@ -583,7 +584,7 @@ func (r *Repository) CompleteStocktake(id string) error {
 // ListSubjects returns all learning subjects ordered by sort_order.
 func (r *Repository) ListSubjects() ([]models.LearningSubject, error) {
 	rows, err := r.DB.Query(
-		`SELECT id, name, description, sort_order, created_at FROM learning_subjects ORDER BY sort_order`,
+		`SELECT id, name, description, sort_order, created_at FROM learning_subjects WHERE tenant_id = $1 ORDER BY sort_order`, r.tenantID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list subjects: %w", err)
@@ -608,9 +609,9 @@ func (r *Repository) CreateSubject(s *models.LearningSubject) error {
 	}
 	s.CreatedAt = time.Now()
 	_, err := r.DB.Exec(
-		`INSERT INTO learning_subjects (id, name, description, sort_order, created_at)
-		 VALUES ($1, $2, $3, $4, $5)`,
-		s.ID, s.Name, s.Description, s.SortOrder, s.CreatedAt,
+		`INSERT INTO learning_subjects (id, name, description, sort_order, created_at, tenant_id)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		s.ID, s.Name, s.Description, s.SortOrder, s.CreatedAt, r.tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("create subject: %w", err)
@@ -621,8 +622,8 @@ func (r *Repository) CreateSubject(s *models.LearningSubject) error {
 // UpdateSubject updates an existing learning subject.
 func (r *Repository) UpdateSubject(s *models.LearningSubject) error {
 	_, err := r.DB.Exec(
-		`UPDATE learning_subjects SET name=$1, description=$2, sort_order=$3 WHERE id=$4`,
-		s.Name, s.Description, s.SortOrder, s.ID,
+		`UPDATE learning_subjects SET name=$1, description=$2, sort_order=$3 WHERE id=$4 AND tenant_id=$5`,
+		s.Name, s.Description, s.SortOrder, s.ID, r.tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("update subject: %w", err)
@@ -633,7 +634,7 @@ func (r *Repository) UpdateSubject(s *models.LearningSubject) error {
 // ListChapters returns all chapters for a given subject.
 func (r *Repository) ListChapters(subjectID string) ([]models.LearningChapter, error) {
 	rows, err := r.DB.Query(
-		`SELECT id, subject_id, name, sort_order FROM learning_chapters WHERE subject_id = $1 ORDER BY sort_order`, subjectID,
+		`SELECT id, subject_id, name, sort_order FROM learning_chapters WHERE subject_id = $1 AND tenant_id = $2 ORDER BY sort_order`, subjectID, r.tenantID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list chapters: %w", err)
@@ -657,9 +658,9 @@ func (r *Repository) CreateChapter(c *models.LearningChapter) error {
 		c.ID = uuid.New().String()
 	}
 	_, err := r.DB.Exec(
-		`INSERT INTO learning_chapters (id, subject_id, name, sort_order)
-		 VALUES ($1, $2, $3, $4)`,
-		c.ID, c.SubjectID, c.Name, c.SortOrder,
+		`INSERT INTO learning_chapters (id, subject_id, name, sort_order, tenant_id)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		c.ID, c.SubjectID, c.Name, c.SortOrder, r.tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("create chapter: %w", err)
@@ -674,9 +675,9 @@ func (r *Repository) ListKnowledgePoints(chapterID string, page, pageSize int) (
 		`SELECT id, chapter_id, title, content, tags, classifications, created_at, updated_at,
 		        COUNT(*) OVER() AS total
 		 FROM knowledge_points
-		 WHERE chapter_id = $1
+		 WHERE chapter_id = $1 AND tenant_id = $4
 		 ORDER BY created_at DESC
-		 LIMIT $2 OFFSET $3`, chapterID, pageSize, offset,
+		 LIMIT $2 OFFSET $3`, chapterID, pageSize, offset, r.tenantID,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list knowledge points: %w", err)
@@ -704,9 +705,9 @@ func (r *Repository) CreateKnowledgePoint(kp *models.KnowledgePoint) error {
 	kp.CreatedAt = now
 	kp.UpdatedAt = now
 	_, err := r.DB.Exec(
-		`INSERT INTO knowledge_points (id, chapter_id, title, content, tags, classifications, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		kp.ID, kp.ChapterID, kp.Title, kp.Content, pq.Array(kp.Tags), kp.Classifications, kp.CreatedAt, kp.UpdatedAt,
+		`INSERT INTO knowledge_points (id, chapter_id, title, content, tags, classifications, created_at, updated_at, tenant_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		kp.ID, kp.ChapterID, kp.Title, kp.Content, pq.Array(kp.Tags), kp.Classifications, kp.CreatedAt, kp.UpdatedAt, r.tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("create knowledge point: %w", err)
@@ -755,9 +756,9 @@ func (r *Repository) SearchKnowledgePoints(query string, page, pageSize int) ([]
 		`SELECT id, chapter_id, title, content, tags, classifications, created_at, updated_at,
 		        COUNT(*) OVER() AS total
 		 FROM knowledge_points
-		 WHERE search_vector @@ to_tsquery('english', $1)
+		 WHERE search_vector @@ to_tsquery('english', $1) AND tenant_id = $4
 		 ORDER BY ts_rank(search_vector, to_tsquery('english', $1)) DESC
-		 LIMIT $2 OFFSET $3`, tsQuery, pageSize, offset,
+		 LIMIT $2 OFFSET $3`, tsQuery, pageSize, offset, r.tenantID,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("search knowledge points: %w", err)
@@ -1179,6 +1180,14 @@ func (r *Repository) CreateSessionPackage(pkg *models.SessionPackage) error {
 }
 
 // ListMembershipTiers returns all membership tiers ordered by sort_order.
+// Membership tiers are intentionally a shared global catalog — the same tier
+// definitions (e.g. "Gold", "Silver") apply across every tenant on the
+// deployment. They carry no PHI and contain no per-tenant data. Scoping them
+// per-tenant would require duplicating catalogue rows for each tenant, which
+// adds operational burden with no security benefit. This is a deliberate
+// architectural decision: tier definitions are managed at the platform level,
+// while the per-tenant data (member.tier_id FK + member.tenant_id) enforces
+// isolation for actual member records.
 func (r *Repository) ListMembershipTiers() ([]models.MembershipTier, error) {
 	rows, err := r.DB.Query(
 		`SELECT id, name, benefits, sort_order FROM membership_tiers ORDER BY sort_order`,
@@ -1204,7 +1213,7 @@ func (r *Repository) ListMembershipTiers() ([]models.MembershipTier, error) {
 // ListRateTables returns all rate tables.
 func (r *Repository) ListRateTables() ([]models.RateTable, error) {
 	rows, err := r.DB.Query(
-		`SELECT id, name, type, tiers, fuel_surcharge_pct, taxable, effective_date FROM rate_tables ORDER BY name`,
+		`SELECT id, name, type, tiers, fuel_surcharge_pct, taxable, effective_date FROM rate_tables WHERE tenant_id = $1 ORDER BY name`, r.tenantID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list rate tables: %w", err)
@@ -1715,7 +1724,7 @@ func (r *Repository) ListExpiredFiles() ([]models.ManagedFile, error) {
 	rows, err := r.DB.Query(
 		`SELECT id, sha256, original_name, mime_type, size_bytes, storage_path, uploaded_by, retention_until, created_at
 		 FROM managed_files
-		 WHERE retention_until IS NOT NULL AND retention_until < NOW()`,
+		 WHERE retention_until IS NOT NULL AND retention_until < NOW() AND tenant_id = $1`, r.tenantID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list expired files: %w", err)

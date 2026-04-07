@@ -182,7 +182,9 @@ export const systemAPI = {
   backup: () => api.post('/system/backup'),
   backupStatus: () => api.get('/system/backup/status'),
   getConfig: () => api.get('/system/config'),
-  updateConfig: (data: Record<string, unknown>) => api.put('/system/config', data),
+  updateConfig: (key: string, value: string) => api.put('/system/config', { key, value }),
+  applyUpdate: () => api.post('/system/update'),
+  rollback: () => api.post('/system/rollback'),
 };
 
 // Drafts

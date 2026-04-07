@@ -296,6 +296,124 @@ func TestCreateStockTransaction_TenantPersisted(t *testing.T) {
 	assertArg(t, cap, "CreateStockTransaction", testTenantID)
 }
 
+// ─── Tests: auth methods fixed in I-001 ──────────────────────────────────────
+
+func TestGetUserByUsername_TenantScoped(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.GetUserByUsername("admin")
+	assertSQL(t, cap, "GetUserByUsername", "tenant_id")
+	assertArg(t, cap, "GetUserByUsername", testTenantID)
+	assertPlaceholders(t, cap, "GetUserByUsername", 2)
+}
+
+func TestCreateUser_TenantPersisted(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.CreateUser(&models.User{Username: "newuser", PasswordHash: "hash", Role: "front_desk"})
+	assertSQL(t, cap, "CreateUser", "tenant_id")
+	assertArg(t, cap, "CreateUser", testTenantID)
+}
+
+func TestIncrementFailedAttempts_TenantScoped(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.IncrementFailedAttempts("user-1")
+	assertSQL(t, cap, "IncrementFailedAttempts", "tenant_id")
+	assertArg(t, cap, "IncrementFailedAttempts", testTenantID)
+}
+
+func TestLockUser_TenantScoped(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.LockUser("user-1", 15)
+	assertSQL(t, cap, "LockUser", "tenant_id")
+	assertArg(t, cap, "LockUser", testTenantID)
+}
+
+func TestUnlockUser_TenantScoped(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.UnlockUser("user-1")
+	assertSQL(t, cap, "UnlockUser", "tenant_id")
+	assertArg(t, cap, "UnlockUser", testTenantID)
+}
+
+func TestResetFailedAttempts_TenantScoped(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.ResetFailedAttempts("user-1")
+	assertSQL(t, cap, "ResetFailedAttempts", "tenant_id")
+	assertArg(t, cap, "ResetFailedAttempts", testTenantID)
+}
+
+func TestUpdateSKU_TenantScoped(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.UpdateSKU(&models.SKU{ID: "sku-1", Name: "Test"})
+	assertSQL(t, cap, "UpdateSKU", "tenant_id")
+	assertArg(t, cap, "UpdateSKU", testTenantID)
+	assertPlaceholders(t, cap, "UpdateSKU", 2)
+}
+
+func TestGetLowStockSKUs_TenantScoped(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.GetLowStockSKUs()
+	assertSQL(t, cap, "GetLowStockSKUs", "tenant_id")
+	assertArg(t, cap, "GetLowStockSKUs", testTenantID)
+}
+
+func TestListRateTables_TenantScoped(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.ListRateTables()
+	assertSQL(t, cap, "ListRateTables", "tenant_id")
+	assertArg(t, cap, "ListRateTables", testTenantID)
+}
+
+func TestListExpiredFiles_TenantScoped(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.ListExpiredFiles()
+	assertSQL(t, cap, "ListExpiredFiles", "tenant_id")
+	assertArg(t, cap, "ListExpiredFiles", testTenantID)
+}
+
+func TestListSubjects_TenantScoped(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.ListSubjects()
+	assertSQL(t, cap, "ListSubjects", "tenant_id")
+	assertArg(t, cap, "ListSubjects", testTenantID)
+}
+
+func TestCreateSubject_TenantPersisted(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.CreateSubject(&models.LearningSubject{Name: "First Aid"})
+	assertSQL(t, cap, "CreateSubject", "tenant_id")
+	assertArg(t, cap, "CreateSubject", testTenantID)
+}
+
+func TestListChapters_TenantScoped(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.ListChapters("subj-1")
+	assertSQL(t, cap, "ListChapters", "tenant_id")
+	assertArg(t, cap, "ListChapters", testTenantID)
+}
+
+// ─── Tests: knowledge point methods fixed in I-001 (BLOCKER) ─────────────────
+
+func TestListKnowledgePoints_TenantScoped(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.ListKnowledgePoints("chapter-1", 1, 20)
+	assertSQL(t, cap, "ListKnowledgePoints", "tenant_id")
+	assertArg(t, cap, "ListKnowledgePoints", testTenantID)
+}
+
+func TestSearchKnowledgePoints_TenantScoped(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.SearchKnowledgePoints("medication safety", 1, 20)
+	assertSQL(t, cap, "SearchKnowledgePoints", "tenant_id")
+	assertArg(t, cap, "SearchKnowledgePoints", testTenantID)
+}
+
+func TestCreateKnowledgePoint_TenantPersisted(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.CreateKnowledgePoint(&models.KnowledgePoint{ChapterID: "chapter-1", Title: "Test KP"})
+	assertSQL(t, cap, "CreateKnowledgePoint", "tenant_id")
+	assertArg(t, cap, "CreateKnowledgePoint", testTenantID)
+}
+
 // ─── Isolation invariant: different tenant IDs produce different bound args ───
 
 // TestTenantArgIsConfiguredValue fails if the repository passes a hardcoded
