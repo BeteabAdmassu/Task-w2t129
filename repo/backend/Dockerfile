@@ -12,7 +12,7 @@ RUN go mod tidy && CGO_ENABLED=0 GOOS=linux go build -o /medops-server ./cmd/ser
 
 FROM alpine:3.19
 
-RUN apk add --no-cache ca-certificates tzdata wget
+RUN apk add --no-cache ca-certificates tzdata wget postgresql-client
 
 WORKDIR /app
 

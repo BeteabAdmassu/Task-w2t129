@@ -172,6 +172,7 @@ CREATE TABLE managed_files (
     mime_type VARCHAR(100) NOT NULL,
     size_bytes BIGINT NOT NULL,
     storage_path VARCHAR(500) NOT NULL,
+    uploaded_by UUID REFERENCES auth_users(id),
     retention_until TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );

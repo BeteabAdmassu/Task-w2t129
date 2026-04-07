@@ -91,7 +91,7 @@ func TestHealthCheck_ReturnsStatusOK(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
-	h := NewSystemHandler(nil)
+	h := NewSystemHandler(nil, "", "")
 	if err := h.HealthCheck(c); err != nil {
 		t.Fatalf("HealthCheck returned error: %v", err)
 	}

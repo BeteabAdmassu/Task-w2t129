@@ -37,10 +37,13 @@ export default function App() {
       <Routes>
         <Route path="/login" element={isAuthenticated ? <Navigate to="/" replace /> : <LoginPage />} />
         <Route path="/" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />
+        {/* /dashboard is an alias for / — referenced by nav shortcuts and post-login redirect */}
+        <Route path="/dashboard" element={<Navigate to="/" replace />} />
         <Route path="/users" element={<RoleRoute roles={['system_admin']}><UsersPage /></RoleRoute>} />
         <Route path="/skus" element={<RoleRoute roles={['system_admin', 'inventory_pharmacist']}><SKUListPage /></RoleRoute>} />
         <Route path="/skus/:id" element={<RoleRoute roles={['system_admin', 'inventory_pharmacist']}><SKUDetailPage /></RoleRoute>} />
         <Route path="/stocktakes" element={<RoleRoute roles={['system_admin', 'inventory_pharmacist']}><StocktakePage /></RoleRoute>} />
+        <Route path="/stocktakes/:id" element={<RoleRoute roles={['system_admin', 'inventory_pharmacist']}><StocktakePage /></RoleRoute>} />
         <Route path="/learning" element={<ProtectedRoute><LearningPage /></ProtectedRoute>} />
         <Route path="/work-orders" element={<ProtectedRoute><WorkOrdersPage /></ProtectedRoute>} />
         <Route path="/work-orders/:id" element={<ProtectedRoute><WorkOrderDetailPage /></ProtectedRoute>} />
@@ -48,6 +51,7 @@ export default function App() {
         <Route path="/members/:id" element={<RoleRoute roles={['system_admin', 'front_desk']}><MemberDetailPage /></RoleRoute>} />
         <Route path="/rate-tables" element={<RoleRoute roles={['system_admin']}><RateTablesPage /></RoleRoute>} />
         <Route path="/statements" element={<RoleRoute roles={['system_admin']}><StatementsPage /></RoleRoute>} />
+        <Route path="/system-config" element={<RoleRoute roles={['system_admin']}><DashboardPage /></RoleRoute>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

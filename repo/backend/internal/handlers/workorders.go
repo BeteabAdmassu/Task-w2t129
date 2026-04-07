@@ -194,7 +194,23 @@ func (h *WorkOrderHandler) CreateWorkOrder(c echo.Context) error {
 	return c.JSON(http.StatusCreated, wo)
 }
 
+// canViewWorkOrder is a pure authorization predicate extracted for testability.
+// Returns true if the given user may read the work order.
+func canViewWorkOrder(userID, role, submittedBy string, assignedTo *string) bool {
+	if role == "system_admin" || role == "maintenance_tech" {
+		return true
+	}
+	if submittedBy == userID {
+		return true
+	}
+	if assignedTo != nil && *assignedTo == userID {
+		return true
+	}
+	return false
+}
+
 // GetWorkOrder returns a single work order by ID.
+// Access is restricted: only the submitter, the assigned technician, or admin/maintenance roles may view.
 func (h *WorkOrderHandler) GetWorkOrder(c echo.Context) error {
 	id := c.Param("id")
 	if id == "" {
@@ -210,6 +226,16 @@ func (h *WorkOrderHandler) GetWorkOrder(c echo.Context) error {
 			Error:   "Work order not found",
 			Code:    http.StatusNotFound,
 			Details: "No work order found with the given ID",
+		})
+	}
+
+	userID := middleware.GetUserID(c)
+	role := middleware.GetUserRole(c)
+	if !canViewWorkOrder(userID, role, wo.SubmittedBy, wo.AssignedTo) {
+		return c.JSON(http.StatusForbidden, models.ErrorResponse{
+			Error:   "Access denied",
+			Code:    http.StatusForbidden,
+			Details: "You are not authorized to view this work order",
 		})
 	}
 

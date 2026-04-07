@@ -1,7 +1,13 @@
 import axios, { AxiosError } from 'axios';
 import type { ErrorResponse } from '../types';
 
-const API_BASE = '/api/v1';
+// In Electron (desktop) mode the preload script injects __ELECTRON_API_BASE__
+// with an absolute URL so API calls work from file:// origins.
+// In web/Docker mode we fall back to the relative path proxied by nginx.
+const API_BASE: string =
+  (typeof window !== 'undefined'
+    ? (window as unknown as Record<string, unknown>).__ELECTRON_API_BASE__ as string | undefined
+    : undefined) ?? '/api/v1';
 
 const api = axios.create({
   baseURL: API_BASE,

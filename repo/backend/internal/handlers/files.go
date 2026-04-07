@@ -110,6 +110,7 @@ func (h *FileHandler) Upload(c echo.Context) error {
 	// Detect MIME type
 	mimeType := http.DetectContentType(content)
 
+	uploaderID := middleware.GetUserID(c)
 	managedFile := &models.ManagedFile{
 		ID:           fileID,
 		SHA256:       hashStr,
@@ -117,6 +118,7 @@ func (h *FileHandler) Upload(c echo.Context) error {
 		MimeType:     mimeType,
 		SizeBytes:    file.Size,
 		StoragePath:  storagePath,
+		UploadedBy:   &uploaderID,
 		CreatedAt:    time.Now(),
 	}
 
@@ -130,14 +132,13 @@ func (h *FileHandler) Upload(c echo.Context) error {
 		})
 	}
 
-	userID := middleware.GetUserID(c)
 	details, _ := json.Marshal(map[string]interface{}{
 		"original_name": file.Filename,
 		"size_bytes":    file.Size,
 		"sha256":        hashStr,
 	})
 	h.repo.CreateAuditLog(&models.AuditLogEntry{
-		UserID:     userID,
+		UserID:     uploaderID,
 		Action:     "upload_file",
 		EntityType: "managed_file",
 		EntityID:   fileID,
@@ -145,7 +146,7 @@ func (h *FileHandler) Upload(c echo.Context) error {
 	})
 
 	logrus.WithFields(logrus.Fields{
-		"user_id": userID,
+		"user_id": uploaderID,
 		"file_id": fileID,
 		"sha256":  hashStr,
 	}).Info("File uploaded")
@@ -153,7 +154,19 @@ func (h *FileHandler) Upload(c echo.Context) error {
 	return c.JSON(http.StatusCreated, managedFile)
 }
 
+// canDownloadFile is a pure authorization predicate extracted for testability.
+func canDownloadFile(userID, role string, uploadedBy *string) bool {
+	if role == "system_admin" || role == "inventory_pharmacist" {
+		return true
+	}
+	if uploadedBy != nil && *uploadedBy == userID {
+		return true
+	}
+	return false
+}
+
 // Download streams a file by ID.
+// Only the uploader or an admin/privileged role may download a file.
 func (h *FileHandler) Download(c echo.Context) error {
 	id := c.Param("id")
 	if id == "" {
@@ -169,6 +182,17 @@ func (h *FileHandler) Download(c echo.Context) error {
 			Error:   "File not found",
 			Code:    http.StatusNotFound,
 			Details: "No file found with the given ID",
+		})
+	}
+
+	// Object-level authorization: only the uploader or privileged roles may download
+	userID := middleware.GetUserID(c)
+	role := middleware.GetUserRole(c)
+	if !canDownloadFile(userID, role, managedFile.UploadedBy) {
+		return c.JSON(http.StatusForbidden, models.ErrorResponse{
+			Error:   "Access denied",
+			Code:    http.StatusForbidden,
+			Details: "You are not authorized to download this file",
 		})
 	}
 

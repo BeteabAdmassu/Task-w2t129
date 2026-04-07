@@ -571,6 +571,16 @@ func (h *InventoryHandler) ListTransactions(c echo.Context) error {
 	})
 }
 
+// adjustTxType returns the schema-valid transaction type ("in" or "out") for an adjustment quantity.
+// Positive or zero quantities are stock-ins; negative quantities are stock-outs.
+// The schema CHECK constraint only permits 'in' and 'out' — never "adjustment_in/out".
+func adjustTxType(quantity int) string {
+	if quantity >= 0 {
+		return "in"
+	}
+	return "out"
+}
+
 // Adjust handles inventory adjustments with a reason code.
 func (h *InventoryHandler) Adjust(c echo.Context) error {
 	var req struct {
@@ -643,11 +653,11 @@ func (h *InventoryHandler) Adjust(c echo.Context) error {
 		})
 	}
 
-	// Determine transaction type
-	txType := "adjustment_in"
+	// Determine transaction type — schema allows only 'in' or 'out';
+	// adjustment direction is conveyed via the reason_code field.
+	txType := adjustTxType(req.Quantity)
 	absQty := req.Quantity
 	if req.Quantity < 0 {
-		txType = "adjustment_out"
 		absQty = -req.Quantity
 	}
 

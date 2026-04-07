@@ -2,13 +2,22 @@
   "name": "medops-frontend",
   "version": "1.0.0",
   "private": true,
-  "type": "module",
+  "main": "dist-main/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+
+    "build:main": "esbuild src/main/main.ts --bundle --platform=node --target=node18 --external:electron --outdir=dist-main --format=cjs --out-extension:.js=.cjs",
+    "build:preload": "esbuild src/main/preload.ts --bundle --platform=node --target=node18 --external:electron --outdir=dist-main --format=cjs --out-extension:.js=.cjs",
+    "build:renderer": "tsc -b && vite build",
+    "build:electron": "npm run build:main && npm run build:preload && npm run build:renderer",
+
+    "electron:dev": "npm run build:main && npm run build:preload && electron .",
+    "dist:win": "npm run build:electron && electron-builder --win --config electron-builder.config.cjs",
+    "dist:win:msi": "npm run build:electron && electron-builder --win msi --config electron-builder.config.cjs"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -16,15 +25,23 @@
     "react-router-dom": "^6.23.1",
     "axios": "^1.7.2"
   },
+  "optionalDependencies": {
+    "embedded-postgres": "^16.6.0"
+  },
   "devDependencies": {
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
+    "@types/node": "^20.14.0",
     "@vitejs/plugin-react": "^4.3.0",
     "typescript": "^5.4.5",
     "vite": "^5.3.1",
     "vitest": "^1.6.0",
     "@testing-library/react": "^15.0.7",
     "@testing-library/jest-dom": "^6.4.5",
-    "jsdom": "^24.1.0"
+    "jsdom": "^24.1.0",
+    "electron": "^31.3.0",
+    "electron-builder": "^24.13.3",
+    "esbuild": "^0.21.5",
+    "concurrently": "^8.2.2"
   }
 }

@@ -3,7 +3,9 @@ FROM node:18-alpine AS builder
 WORKDIR /build
 
 COPY package.json ./
-RUN npm install --legacy-peer-deps
+RUN npm install --legacy-peer-deps --omit=optional && \
+    ROLLUP_VER=$(node -e "console.log(require('./node_modules/rollup/package.json').version)") && \
+    npm install --no-save "@rollup/rollup-linux-x64-musl@${ROLLUP_VER}"
 
 COPY . .
 RUN npm run build

@@ -203,6 +203,7 @@ type ManagedFile struct {
 	MimeType       string     `json:"mime_type"`
 	SizeBytes      int64      `json:"size_bytes"`
 	StoragePath    string     `json:"storage_path"`
+	UploadedBy     *string    `json:"uploaded_by,omitempty"`
 	RetentionUntil *time.Time `json:"retention_until,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
 }

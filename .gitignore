@@ -9,3 +9,4 @@ build/
 coverage/
 .venv/
 venv/
+settings.local.json

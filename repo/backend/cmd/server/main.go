@@ -65,7 +65,7 @@ func main() {
 		log.WithError(err).Fatal("Failed to create migration driver")
 	}
 
-	m, err := migrate.NewWithDatabaseInstance("file:///app/migrations", "postgres", driver)
+	m, err := migrate.NewWithDatabaseInstance("file://"+cfg.MigrationsPath, "postgres", driver)
 	if err != nil {
 		log.WithError(err).Fatal("Failed to create migrator")
 	}
@@ -78,8 +78,12 @@ func main() {
 	// Create data directory
 	os.MkdirAll(cfg.DataDir, 0755)
 
-	// Initialize repository
-	repo := repository.New(db)
+	// Initialize repository (pass encrypt key for at-rest encryption of sensitive member fields)
+	repo := repository.New(db, cfg.EncryptKey, cfg.TenantID)
+
+	// Start retention scheduler — purges managed files past their retention_until date.
+	retentionDone := make(chan struct{})
+	handlers.StartRetentionScheduler(repo, cfg.DataDir, retentionDone)
 
 	// Initialize Echo
 	e := echo.New()
@@ -106,7 +110,7 @@ func main() {
 	memberHandler := handlers.NewMemberHandler(repo, cfg.EncryptKey)
 	chargeHandler := handlers.NewChargeHandler(repo, cfg.HMACKey)
 	fileHandler := handlers.NewFileHandler(repo, cfg.DataDir)
-	systemHandler := handlers.NewSystemHandler(repo)
+	systemHandler := handlers.NewSystemHandler(repo, cfg.DataDir, cfg.DatabaseURL)
 
 	// Auth middleware
 	authMW := middleware.JWTAuth(cfg.JWTSecret)
@@ -222,6 +226,8 @@ func main() {
 	sys := api.Group("/system", authMW, adminRole)
 	sys.POST("/backup", systemHandler.Backup)
 	sys.GET("/backup/status", systemHandler.BackupStatus)
+	sys.POST("/update", systemHandler.ApplyUpdate)
+	sys.POST("/rollback", systemHandler.Rollback)
 	sys.GET("/config", systemHandler.GetConfig)
 	sys.PUT("/config", systemHandler.UpdateConfig)
 
@@ -249,6 +255,7 @@ func main() {
 	<-quit
 
 	log.Info("Shutting down server...")
+	close(retentionDone)
 	e.Close()
 	db.Close()
 	log.Info("Server stopped")

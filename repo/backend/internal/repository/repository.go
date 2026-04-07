@@ -1,8 +1,14 @@
 package repository
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,12 +20,60 @@ import (
 
 // Repository wraps a *sql.DB and provides methods for all database operations.
 type Repository struct {
-	DB *sql.DB
+	DB         *sql.DB
+	encryptKey []byte
+	tenantID   string
 }
 
-// New creates a new Repository with the given database connection.
-func New(db *sql.DB) *Repository {
-	return &Repository{DB: db}
+// New creates a new Repository with the given database connection, AES-256 encryption key, and tenant ID.
+func New(db *sql.DB, encryptKey, tenantID string) *Repository {
+	var k [32]byte
+	copy(k[:], []byte(encryptKey))
+	return &Repository{DB: db, encryptKey: k[:], tenantID: tenantID}
+}
+
+// encryptDecimal encrypts a float64 monetary value using AES-256-GCM.
+func (r *Repository) encryptDecimal(value float64) ([]byte, error) {
+	block, err := aes.NewCipher(r.encryptKey)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	plaintext := []byte(strconv.FormatFloat(value, 'f', 2, 64))
+	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
+	return []byte(hex.EncodeToString(ciphertext)), nil
+}
+
+// decryptDecimal decrypts an AES-256-GCM encrypted monetary value back to float64.
+func (r *Repository) decryptDecimal(data []byte) (float64, error) {
+	ciphertext, err := hex.DecodeString(string(data))
+	if err != nil {
+		return 0, err
+	}
+	block, err := aes.NewCipher(r.encryptKey)
+	if err != nil {
+		return 0, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return 0, err
+	}
+	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return 0, fmt.Errorf("ciphertext too short")
+	}
+	plaintext, err := gcm.Open(nil, ciphertext[:nonceSize], ciphertext[nonceSize:], nil)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseFloat(string(plaintext), 64)
 }
 
 // ---------- Auth ----------
@@ -188,17 +242,18 @@ func (r *Repository) ListSKUs(search string, page, pageSize int) ([]models.SKU, 
 			`SELECT id, ndc, upc, name, description, unit_of_measure, low_stock_threshold, storage_location, is_active, created_at,
 			        COUNT(*) OVER() AS total
 			 FROM skus
-			 WHERE name ILIKE $1 OR ndc ILIKE $1 OR upc ILIKE $1
+			 WHERE (name ILIKE $1 OR ndc ILIKE $1 OR upc ILIKE $1) AND tenant_id = $2
 			 ORDER BY name
-			 LIMIT $2 OFFSET $3`, pattern, pageSize, offset,
+			 LIMIT $3 OFFSET $4`, pattern, r.tenantID, pageSize, offset,
 		)
 	} else {
 		rows, err = r.DB.Query(
 			`SELECT id, ndc, upc, name, description, unit_of_measure, low_stock_threshold, storage_location, is_active, created_at,
 			        COUNT(*) OVER() AS total
 			 FROM skus
+			 WHERE tenant_id = $1
 			 ORDER BY name
-			 LIMIT $1 OFFSET $2`, pageSize, offset,
+			 LIMIT $2 OFFSET $3`, r.tenantID, pageSize, offset,
 		)
 	}
 	if err != nil {
@@ -241,9 +296,9 @@ func (r *Repository) CreateSKU(sku *models.SKU) error {
 	}
 	sku.CreatedAt = time.Now()
 	_, err := r.DB.Exec(
-		`INSERT INTO skus (id, ndc, upc, name, description, unit_of_measure, low_stock_threshold, storage_location, is_active, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		sku.ID, sku.NDC, sku.UPC, sku.Name, sku.Description, sku.UnitOfMeasure, sku.LowStockThreshold, sku.StorageLocation, sku.IsActive, sku.CreatedAt,
+		`INSERT INTO skus (id, ndc, upc, name, description, unit_of_measure, low_stock_threshold, storage_location, is_active, created_at, tenant_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		sku.ID, sku.NDC, sku.UPC, sku.Name, sku.Description, sku.UnitOfMeasure, sku.LowStockThreshold, sku.StorageLocation, sku.IsActive, sku.CreatedAt, r.tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("create sku: %w", err)
@@ -797,7 +852,7 @@ func (r *Repository) GetTechnicianWithLeastOrders(trade string) (*models.User, e
 	err := r.DB.QueryRow(
 		`SELECT u.id, u.username, u.password_hash, u.role, u.failed_attempts, u.locked_until, u.is_active, u.created_at, u.updated_at
 		 FROM auth_users u
-		 WHERE u.role = 'technician' AND u.is_active = true
+		 WHERE u.role = 'maintenance_tech' AND u.is_active = true
 		 ORDER BY (
 		   SELECT COUNT(*) FROM work_orders wo
 		   WHERE wo.assigned_to = u.id AND wo.status IN ('open', 'in_progress')
@@ -881,6 +936,17 @@ func (r *Repository) GetWorkOrderAnalytics() (map[string]interface{}, error) {
 
 // ---------- Members ----------
 
+// scanMemberStoredValue decrypts stored_value_encrypted if present, otherwise
+// falls back to the plaintext stored_value column (backward-compat for migrated rows).
+func (r *Repository) scanMemberStoredValue(encBytes []byte, plaintext float64) float64 {
+	if len(encBytes) > 0 {
+		if v, err := r.decryptDecimal(encBytes); err == nil {
+			return v
+		}
+	}
+	return plaintext
+}
+
 // ListMembers returns paginated members with optional search on name/phone.
 func (r *Repository) ListMembers(search string, page, pageSize int) ([]models.Member, int, error) {
 	offset := (page - 1) * pageSize
@@ -890,20 +956,21 @@ func (r *Repository) ListMembers(search string, page, pageSize int) ([]models.Me
 	if search != "" {
 		pattern := "%" + search + "%"
 		rows, err = r.DB.Query(
-			`SELECT id, name, id_number_encrypted, phone, tier_id, points_balance, stored_value, status, frozen_at, expires_at, created_at,
+			`SELECT id, name, id_number_encrypted, phone, tier_id, points_balance, stored_value, stored_value_encrypted, status, frozen_at, expires_at, created_at,
 			        COUNT(*) OVER() AS total
 			 FROM members
-			 WHERE name ILIKE $1 OR phone ILIKE $1
+			 WHERE (name ILIKE $1 OR phone ILIKE $1) AND tenant_id = $2
 			 ORDER BY name
-			 LIMIT $2 OFFSET $3`, pattern, pageSize, offset,
+			 LIMIT $3 OFFSET $4`, pattern, r.tenantID, pageSize, offset,
 		)
 	} else {
 		rows, err = r.DB.Query(
-			`SELECT id, name, id_number_encrypted, phone, tier_id, points_balance, stored_value, status, frozen_at, expires_at, created_at,
+			`SELECT id, name, id_number_encrypted, phone, tier_id, points_balance, stored_value, stored_value_encrypted, status, frozen_at, expires_at, created_at,
 			        COUNT(*) OVER() AS total
 			 FROM members
+			 WHERE tenant_id = $1
 			 ORDER BY name
-			 LIMIT $1 OFFSET $2`, pageSize, offset,
+			 LIMIT $2 OFFSET $3`, r.tenantID, pageSize, offset,
 		)
 	}
 	if err != nil {
@@ -915,9 +982,12 @@ func (r *Repository) ListMembers(search string, page, pageSize int) ([]models.Me
 	var total int
 	for rows.Next() {
 		var m models.Member
-		if err := rows.Scan(&m.ID, &m.Name, &m.IDNumberEncrypted, &m.Phone, &m.TierID, &m.PointsBalance, &m.StoredValue, &m.Status, &m.FrozenAt, &m.ExpiresAt, &m.CreatedAt, &total); err != nil {
+		var plainSV float64
+		var encSV []byte
+		if err := rows.Scan(&m.ID, &m.Name, &m.IDNumberEncrypted, &m.Phone, &m.TierID, &m.PointsBalance, &plainSV, &encSV, &m.Status, &m.FrozenAt, &m.ExpiresAt, &m.CreatedAt, &total); err != nil {
 			return nil, 0, fmt.Errorf("list members scan: %w", err)
 		}
+		m.StoredValue = r.scanMemberStoredValue(encSV, plainSV)
 		members = append(members, m)
 	}
 	return members, total, rows.Err()
@@ -926,29 +996,36 @@ func (r *Repository) ListMembers(search string, page, pageSize int) ([]models.Me
 // GetMember retrieves a single member by ID.
 func (r *Repository) GetMember(id string) (*models.Member, error) {
 	m := &models.Member{}
+	var plainSV float64
+	var encSV []byte
 	err := r.DB.QueryRow(
-		`SELECT id, name, id_number_encrypted, phone, tier_id, points_balance, stored_value, status, frozen_at, expires_at, created_at
-		 FROM members WHERE id = $1`, id,
-	).Scan(&m.ID, &m.Name, &m.IDNumberEncrypted, &m.Phone, &m.TierID, &m.PointsBalance, &m.StoredValue, &m.Status, &m.FrozenAt, &m.ExpiresAt, &m.CreatedAt)
+		`SELECT id, name, id_number_encrypted, phone, tier_id, points_balance, stored_value, stored_value_encrypted, status, frozen_at, expires_at, created_at
+		 FROM members WHERE id = $1 AND tenant_id = $2`, id, r.tenantID,
+	).Scan(&m.ID, &m.Name, &m.IDNumberEncrypted, &m.Phone, &m.TierID, &m.PointsBalance, &plainSV, &encSV, &m.Status, &m.FrozenAt, &m.ExpiresAt, &m.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get member: %w", err)
 	}
+	m.StoredValue = r.scanMemberStoredValue(encSV, plainSV)
 	return m, nil
 }
 
-// CreateMember inserts a new member.
+// CreateMember inserts a new member, encrypting stored_value into stored_value_encrypted.
 func (r *Repository) CreateMember(m *models.Member) error {
 	if m.ID == "" {
 		m.ID = uuid.New().String()
 	}
 	m.CreatedAt = time.Now()
-	_, err := r.DB.Exec(
-		`INSERT INTO members (id, name, id_number_encrypted, phone, tier_id, points_balance, stored_value, status, frozen_at, expires_at, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		m.ID, m.Name, m.IDNumberEncrypted, m.Phone, m.TierID, m.PointsBalance, m.StoredValue, m.Status, m.FrozenAt, m.ExpiresAt, m.CreatedAt,
+	encSV, err := r.encryptDecimal(m.StoredValue)
+	if err != nil {
+		return fmt.Errorf("create member: encrypt stored_value: %w", err)
+	}
+	_, err = r.DB.Exec(
+		`INSERT INTO members (id, name, id_number_encrypted, phone, tier_id, points_balance, stored_value, stored_value_encrypted, status, frozen_at, expires_at, created_at, tenant_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9, $10, $11, $12)`,
+		m.ID, m.Name, m.IDNumberEncrypted, m.Phone, m.TierID, m.PointsBalance, encSV, m.Status, m.FrozenAt, m.ExpiresAt, m.CreatedAt, r.tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("create member: %w", err)
@@ -956,12 +1033,16 @@ func (r *Repository) CreateMember(m *models.Member) error {
 	return nil
 }
 
-// UpdateMember updates an existing member.
+// UpdateMember updates an existing member, encrypting stored_value into stored_value_encrypted.
 func (r *Repository) UpdateMember(m *models.Member) error {
-	_, err := r.DB.Exec(
-		`UPDATE members SET name=$1, id_number_encrypted=$2, phone=$3, tier_id=$4, points_balance=$5, stored_value=$6, status=$7, frozen_at=$8, expires_at=$9
-		 WHERE id=$10`,
-		m.Name, m.IDNumberEncrypted, m.Phone, m.TierID, m.PointsBalance, m.StoredValue, m.Status, m.FrozenAt, m.ExpiresAt, m.ID,
+	encSV, err := r.encryptDecimal(m.StoredValue)
+	if err != nil {
+		return fmt.Errorf("update member: encrypt stored_value: %w", err)
+	}
+	_, err = r.DB.Exec(
+		`UPDATE members SET name=$1, id_number_encrypted=$2, phone=$3, tier_id=$4, points_balance=$5, stored_value=0, stored_value_encrypted=$6, status=$7, frozen_at=$8, expires_at=$9, tenant_id=$10
+		 WHERE id=$11`,
+		m.Name, m.IDNumberEncrypted, m.Phone, m.TierID, m.PointsBalance, encSV, m.Status, m.FrozenAt, m.ExpiresAt, r.tenantID, m.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update member: %w", err)
@@ -1253,9 +1334,9 @@ func (r *Repository) CreateLineItem(item *models.ChargeLineItem) error {
 func (r *Repository) GetFileByHash(sha256 string) (*models.ManagedFile, error) {
 	f := &models.ManagedFile{}
 	err := r.DB.QueryRow(
-		`SELECT id, sha256, original_name, mime_type, size_bytes, storage_path, retention_until, created_at
+		`SELECT id, sha256, original_name, mime_type, size_bytes, storage_path, uploaded_by, retention_until, created_at
 		 FROM managed_files WHERE sha256 = $1`, sha256,
-	).Scan(&f.ID, &f.SHA256, &f.OriginalName, &f.MimeType, &f.SizeBytes, &f.StoragePath, &f.RetentionUntil, &f.CreatedAt)
+	).Scan(&f.ID, &f.SHA256, &f.OriginalName, &f.MimeType, &f.SizeBytes, &f.StoragePath, &f.UploadedBy, &f.RetentionUntil, &f.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1272,9 +1353,9 @@ func (r *Repository) CreateFile(f *models.ManagedFile) error {
 	}
 	f.CreatedAt = time.Now()
 	_, err := r.DB.Exec(
-		`INSERT INTO managed_files (id, sha256, original_name, mime_type, size_bytes, storage_path, retention_until, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		f.ID, f.SHA256, f.OriginalName, f.MimeType, f.SizeBytes, f.StoragePath, f.RetentionUntil, f.CreatedAt,
+		`INSERT INTO managed_files (id, sha256, original_name, mime_type, size_bytes, storage_path, uploaded_by, retention_until, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		f.ID, f.SHA256, f.OriginalName, f.MimeType, f.SizeBytes, f.StoragePath, f.UploadedBy, f.RetentionUntil, f.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create file: %w", err)
@@ -1286,9 +1367,9 @@ func (r *Repository) CreateFile(f *models.ManagedFile) error {
 func (r *Repository) GetFile(id string) (*models.ManagedFile, error) {
 	f := &models.ManagedFile{}
 	err := r.DB.QueryRow(
-		`SELECT id, sha256, original_name, mime_type, size_bytes, storage_path, retention_until, created_at
+		`SELECT id, sha256, original_name, mime_type, size_bytes, storage_path, uploaded_by, retention_until, created_at
 		 FROM managed_files WHERE id = $1`, id,
-	).Scan(&f.ID, &f.SHA256, &f.OriginalName, &f.MimeType, &f.SizeBytes, &f.StoragePath, &f.RetentionUntil, &f.CreatedAt)
+	).Scan(&f.ID, &f.SHA256, &f.OriginalName, &f.MimeType, &f.SizeBytes, &f.StoragePath, &f.UploadedBy, &f.RetentionUntil, &f.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1515,7 +1596,7 @@ func (r *Repository) GetFilesByIDs(ids []string) ([]models.ManagedFile, error) {
 		return nil, nil
 	}
 	rows, err := r.DB.Query(
-		`SELECT id, sha256, original_name, mime_type, size_bytes, storage_path, retention_until, created_at
+		`SELECT id, sha256, original_name, mime_type, size_bytes, storage_path, uploaded_by, retention_until, created_at
 		 FROM managed_files WHERE id = ANY($1)`, pq.Array(ids),
 	)
 	if err != nil {
@@ -1526,12 +1607,44 @@ func (r *Repository) GetFilesByIDs(ids []string) ([]models.ManagedFile, error) {
 	var files []models.ManagedFile
 	for rows.Next() {
 		var f models.ManagedFile
-		if err := rows.Scan(&f.ID, &f.SHA256, &f.OriginalName, &f.MimeType, &f.SizeBytes, &f.StoragePath, &f.RetentionUntil, &f.CreatedAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.SHA256, &f.OriginalName, &f.MimeType, &f.SizeBytes, &f.StoragePath, &f.UploadedBy, &f.RetentionUntil, &f.CreatedAt); err != nil {
 			return nil, fmt.Errorf("get files by ids scan: %w", err)
 		}
 		files = append(files, f)
 	}
 	return files, rows.Err()
+}
+
+// ListExpiredFiles returns managed files whose retention_until is set and has passed.
+func (r *Repository) ListExpiredFiles() ([]models.ManagedFile, error) {
+	rows, err := r.DB.Query(
+		`SELECT id, sha256, original_name, mime_type, size_bytes, storage_path, uploaded_by, retention_until, created_at
+		 FROM managed_files
+		 WHERE retention_until IS NOT NULL AND retention_until < NOW()`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list expired files: %w", err)
+	}
+	defer rows.Close()
+
+	var files []models.ManagedFile
+	for rows.Next() {
+		var f models.ManagedFile
+		if err := rows.Scan(&f.ID, &f.SHA256, &f.OriginalName, &f.MimeType, &f.SizeBytes, &f.StoragePath, &f.UploadedBy, &f.RetentionUntil, &f.CreatedAt); err != nil {
+			return nil, fmt.Errorf("list expired files scan: %w", err)
+		}
+		files = append(files, f)
+	}
+	return files, rows.Err()
+}
+
+// DeleteFileRecord removes a managed file record from the database.
+func (r *Repository) DeleteFileRecord(id string) error {
+	_, err := r.DB.Exec(`DELETE FROM managed_files WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete file record %s: %w", id, err)
+	}
+	return nil
 }
 
 // GetDraftByID retrieves a draft checkpoint by its ID.

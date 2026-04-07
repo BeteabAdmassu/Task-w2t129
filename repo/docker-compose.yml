@@ -28,6 +28,7 @@ services:
       HMAC_SIGNING_KEY: "medops-export-signing-key-change-in-production"
       LOG_LEVEL: "info"
       DATA_DIR: "/data/medops"
+      TENANT_ID: "default"
     ports:
       - "8080:8080"
     depends_on:

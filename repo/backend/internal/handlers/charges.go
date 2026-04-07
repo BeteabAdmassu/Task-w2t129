@@ -512,6 +512,23 @@ func (h *ChargeHandler) GenerateStatement(c echo.Context) error {
 	})
 }
 
+// statementIsReconcilable returns true only when the statement is in draft status.
+func statementIsReconcilable(status string) bool { return status == "draft" }
+
+// statementIsApprovable returns true only when the statement is awaiting approval.
+func statementIsApprovable(status string) bool { return status == "pending_approval" }
+
+// approvalStep returns 1 if the first approver slot is empty, 2 if the second is, or 0 if fully approved.
+func approvalStep(approvedBy1, approvedBy2 *string) int {
+	if approvedBy1 == nil {
+		return 1
+	}
+	if approvedBy2 == nil {
+		return 2
+	}
+	return 0
+}
+
 // ReconcileStatement reconciles a statement, requiring variance notes if delta > $25.
 func (h *ChargeHandler) ReconcileStatement(c echo.Context) error {
 	id := c.Param("id")
@@ -538,6 +555,14 @@ func (h *ChargeHandler) ReconcileStatement(c echo.Context) error {
 		})
 	}
 
+	if !statementIsReconcilable(statement.Status) {
+		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Invalid statement state",
+			Code:    http.StatusBadRequest,
+			Details: "Only draft statements can be reconciled",
+		})
+	}
+
 	var req models.ReconcileRequest
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
@@ -558,7 +583,7 @@ func (h *ChargeHandler) ReconcileStatement(c echo.Context) error {
 	if req.VarianceNotes != "" {
 		statement.VarianceNotes = &req.VarianceNotes
 	}
-	statement.Status = "reconciled"
+	statement.Status = "pending_approval"
 
 	if err := h.repo.UpdateStatement(statement); err != nil {
 		logrus.WithError(err).Error("Failed to reconcile statement")
@@ -617,10 +642,17 @@ func (h *ChargeHandler) ApproveStatement(c echo.Context) error {
 
 	userID := middleware.GetUserID(c)
 
+	if !statementIsApprovable(statement.Status) {
+		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Invalid statement state",
+			Code:    http.StatusBadRequest,
+			Details: "Statement must be in pending_approval status before it can be approved",
+		})
+	}
+
 	if statement.ApprovedBy1 == nil {
-		// First approval
+		// First approval — status stays pending_approval until second approval
 		statement.ApprovedBy1 = &userID
-		statement.Status = "pending_approval_2"
 	} else if statement.ApprovedBy2 == nil {
 		// Second approval -- must be different user
 		if *statement.ApprovedBy1 == userID {
@@ -704,33 +736,63 @@ func (h *ChargeHandler) ExportStatement(c echo.Context) error {
 		lineItems = []models.ChargeLineItem{}
 	}
 
-	// Generate CSV content
-	var sb strings.Builder
-	writer := csv.NewWriter(&sb)
-
-	// Header row
-	writer.Write([]string{"ID", "Period Start", "Period End", "Total Amount", "Status"})
-	writer.Write([]string{statement.ID, statement.PeriodStart, statement.PeriodEnd,
-		fmt.Sprintf("%.2f", statement.TotalAmount), statement.Status})
-
-	writer.Write([]string{}) // blank line
-	writer.Write([]string{"Line Item ID", "Description", "Quantity", "Unit Price", "Surcharge", "Tax", "Total"})
-
-	for _, item := range lineItems {
-		writer.Write([]string{
-			item.ID,
-			item.Description,
-			fmt.Sprintf("%.2f", item.Quantity),
-			fmt.Sprintf("%.2f", item.UnitPrice),
-			fmt.Sprintf("%.2f", item.Surcharge),
-			fmt.Sprintf("%.2f", item.Tax),
-			fmt.Sprintf("%.2f", item.Total),
-		})
+	format := c.QueryParam("format")
+	if format == "" {
+		format = "csv"
 	}
-	writer.Flush()
-	content := []byte(sb.String())
 
-	// Compute HMAC-SHA256 signature
+	var content []byte
+	var contentType string
+	var filename string
+
+	if format == "json" {
+		// Signed JSON export
+		payload := map[string]interface{}{
+			"statement":  statement,
+			"line_items": lineItems,
+			"exported_at": time.Now().UTC().Format(time.RFC3339),
+		}
+		content, err = json.Marshal(payload)
+		if err != nil {
+			logrus.WithError(err).Error("Failed to marshal JSON export")
+			return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error: "Failed to generate JSON export",
+				Code:  http.StatusInternalServerError,
+			})
+		}
+		contentType = "application/json"
+		filename = fmt.Sprintf("statement_%s.json", id)
+	} else {
+		// CSV export
+		var sb strings.Builder
+		writer := csv.NewWriter(&sb)
+
+		// Header row
+		writer.Write([]string{"ID", "Period Start", "Period End", "Total Amount", "Status"})
+		writer.Write([]string{statement.ID, statement.PeriodStart, statement.PeriodEnd,
+			fmt.Sprintf("%.2f", statement.TotalAmount), statement.Status})
+
+		writer.Write([]string{}) // blank line
+		writer.Write([]string{"Line Item ID", "Description", "Quantity", "Unit Price", "Surcharge", "Tax", "Total"})
+
+		for _, item := range lineItems {
+			writer.Write([]string{
+				item.ID,
+				item.Description,
+				fmt.Sprintf("%.2f", item.Quantity),
+				fmt.Sprintf("%.2f", item.UnitPrice),
+				fmt.Sprintf("%.2f", item.Surcharge),
+				fmt.Sprintf("%.2f", item.Tax),
+				fmt.Sprintf("%.2f", item.Total),
+			})
+		}
+		writer.Flush()
+		content = []byte(sb.String())
+		contentType = "text/csv"
+		filename = fmt.Sprintf("statement_%s.csv", id)
+	}
+
+	// Compute HMAC-SHA256 signature over content
 	mac := hmac.New(sha256.New, []byte(h.hmacKey))
 	mac.Write(content)
 	signature := hex.EncodeToString(mac.Sum(nil))
@@ -743,7 +805,7 @@ func (h *ChargeHandler) ExportStatement(c echo.Context) error {
 	userID := middleware.GetUserID(c)
 	details, _ := json.Marshal(map[string]string{
 		"statement_id": id,
-		"format":       "csv",
+		"format":       format,
 	})
 	h.repo.CreateAuditLog(&models.AuditLogEntry{
 		UserID:     userID,
@@ -753,11 +815,11 @@ func (h *ChargeHandler) ExportStatement(c echo.Context) error {
 		Details:    details,
 	})
 
-	c.Response().Header().Set("Content-Type", "text/csv")
+	c.Response().Header().Set("Content-Type", contentType)
 	c.Response().Header().Set("X-HMAC-Signature", signature)
-	c.Response().Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"statement_%s.csv\"", id))
+	c.Response().Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
 
-	return c.Blob(http.StatusOK, "text/csv", content)
+	return c.Blob(http.StatusOK, contentType, content)
 }
 
 // Ensure io import is used (for ImportRateTableCSV)
