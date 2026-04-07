@@ -1,0 +1,19 @@
+# PLACEHOLDER — replace for the actual tech stack
+# Place .dockerignore in each build context directory if using subdirs
+node_modules
+__pycache__
+*.pyc
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+.tmp
+coverage
+*.md
+!README.md
+docker-compose*.yml
+run_tests.sh
+.vscode
+.idea
+.DS_Store

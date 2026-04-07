@@ -1,0 +1,36 @@
+# Dev tools — not part of delivery
+CLAUDE.md
+implement.md
+fix.md
+
+# Evaluator output
+.tmp/
+
+# Env
+.env
+.env.local
+
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+vendor/
+target/
+
+# Build output
+dist/
+build/
+coverage/
+.nyc_output/
+htmlcov/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# OS
+Thumbs.db

@@ -1,0 +1,13 @@
+# PLACEHOLDER — MUST replace this entire file.
+# This file ALWAYS lives at repo/ root.
+# Configure services for the actual tech stack from the prompt.
+#
+# CI runner does: docker compose up --build -d
+# Then runs: ./run_tests.sh on the host
+#
+# Rules:
+#   - App must work after 'up' with ZERO manual steps
+#   - All env vars must have defaults (CI has no .env)
+#   - DB must auto-initialize
+#   - Health checks must be defined
+#   - build.context must point to where each Dockerfile lives
