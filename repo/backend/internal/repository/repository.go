@@ -1228,7 +1228,8 @@ func (r *Repository) UpdateRateTable(rt *models.RateTable) error {
 func (r *Repository) ListStatements(page, pageSize int) ([]models.ChargeStatement, int, error) {
 	offset := (page - 1) * pageSize
 	rows, err := r.DB.Query(
-		`SELECT id, period_start, period_end, total_amount, status, approved_by_1, approved_by_2, variance_notes, exported_at, created_at,
+		`SELECT id, period_start, period_end, total_amount, expected_total, status,
+		        approved_by, variance_notes, paid_at, created_at,
 		        COUNT(*) OVER() AS total
 		 FROM charge_statements
 		 ORDER BY created_at DESC
@@ -1243,7 +1244,8 @@ func (r *Repository) ListStatements(page, pageSize int) ([]models.ChargeStatemen
 	var total int
 	for rows.Next() {
 		var s models.ChargeStatement
-		if err := rows.Scan(&s.ID, &s.PeriodStart, &s.PeriodEnd, &s.TotalAmount, &s.Status, &s.ApprovedBy1, &s.ApprovedBy2, &s.VarianceNotes, &s.ExportedAt, &s.CreatedAt, &total); err != nil {
+		if err := rows.Scan(&s.ID, &s.PeriodStart, &s.PeriodEnd, &s.TotalAmount, &s.ExpectedTotal,
+			&s.Status, &s.ApprovedBy, &s.VarianceNotes, &s.PaidAt, &s.CreatedAt, &total); err != nil {
 			return nil, 0, fmt.Errorf("list statements scan: %w", err)
 		}
 		stmts = append(stmts, s)
@@ -1255,9 +1257,11 @@ func (r *Repository) ListStatements(page, pageSize int) ([]models.ChargeStatemen
 func (r *Repository) GetStatement(id string) (*models.ChargeStatement, error) {
 	s := &models.ChargeStatement{}
 	err := r.DB.QueryRow(
-		`SELECT id, period_start, period_end, total_amount, status, approved_by_1, approved_by_2, variance_notes, exported_at, created_at
+		`SELECT id, period_start, period_end, total_amount, expected_total, status,
+		        approved_by, variance_notes, paid_at, created_at
 		 FROM charge_statements WHERE id = $1`, id,
-	).Scan(&s.ID, &s.PeriodStart, &s.PeriodEnd, &s.TotalAmount, &s.Status, &s.ApprovedBy1, &s.ApprovedBy2, &s.VarianceNotes, &s.ExportedAt, &s.CreatedAt)
+	).Scan(&s.ID, &s.PeriodStart, &s.PeriodEnd, &s.TotalAmount, &s.ExpectedTotal, &s.Status,
+		&s.ApprovedBy, &s.VarianceNotes, &s.PaidAt, &s.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1274,9 +1278,11 @@ func (r *Repository) CreateStatement(stmt *models.ChargeStatement) error {
 	}
 	stmt.CreatedAt = time.Now()
 	_, err := r.DB.Exec(
-		`INSERT INTO charge_statements (id, period_start, period_end, total_amount, status, approved_by_1, approved_by_2, variance_notes, exported_at, created_at)
+		`INSERT INTO charge_statements (id, period_start, period_end, total_amount, expected_total, status,
+		        approved_by, variance_notes, paid_at, created_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		stmt.ID, stmt.PeriodStart, stmt.PeriodEnd, stmt.TotalAmount, stmt.Status, stmt.ApprovedBy1, stmt.ApprovedBy2, stmt.VarianceNotes, stmt.ExportedAt, stmt.CreatedAt,
+		stmt.ID, stmt.PeriodStart, stmt.PeriodEnd, stmt.TotalAmount, stmt.ExpectedTotal, stmt.Status,
+		stmt.ApprovedBy, stmt.VarianceNotes, stmt.PaidAt, stmt.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create statement: %w", err)
@@ -1287,9 +1293,12 @@ func (r *Repository) CreateStatement(stmt *models.ChargeStatement) error {
 // UpdateStatement updates an existing charge statement.
 func (r *Repository) UpdateStatement(stmt *models.ChargeStatement) error {
 	_, err := r.DB.Exec(
-		`UPDATE charge_statements SET period_start=$1, period_end=$2, total_amount=$3, status=$4, approved_by_1=$5, approved_by_2=$6, variance_notes=$7, exported_at=$8
+		`UPDATE charge_statements
+		 SET period_start=$1, period_end=$2, total_amount=$3, expected_total=$4,
+		     status=$5, approved_by=$6, variance_notes=$7, paid_at=$8
 		 WHERE id=$9`,
-		stmt.PeriodStart, stmt.PeriodEnd, stmt.TotalAmount, stmt.Status, stmt.ApprovedBy1, stmt.ApprovedBy2, stmt.VarianceNotes, stmt.ExportedAt, stmt.ID,
+		stmt.PeriodStart, stmt.PeriodEnd, stmt.TotalAmount, stmt.ExpectedTotal,
+		stmt.Status, stmt.ApprovedBy, stmt.VarianceNotes, stmt.PaidAt, stmt.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update statement: %w", err)
@@ -1616,6 +1625,53 @@ func (r *Repository) GetFilesByIDs(ids []string) ([]models.ManagedFile, error) {
 		var f models.ManagedFile
 		if err := rows.Scan(&f.ID, &f.SHA256, &f.OriginalName, &f.MimeType, &f.SizeBytes, &f.StoragePath, &f.UploadedBy, &f.RetentionUntil, &f.CreatedAt); err != nil {
 			return nil, fmt.Errorf("get files by ids scan: %w", err)
+		}
+		files = append(files, f)
+	}
+	return files, rows.Err()
+}
+
+// LinkPhotoToWorkOrder creates a persistent link between a work order and a managed file.
+func (r *Repository) LinkPhotoToWorkOrder(workOrderID, fileID string) (*models.WorkOrderPhoto, error) {
+	photo := &models.WorkOrderPhoto{
+		ID:          uuid.New().String(),
+		WorkOrderID: workOrderID,
+		FileID:      fileID,
+		CreatedAt:   time.Now(),
+	}
+	_, err := r.DB.Exec(
+		`INSERT INTO work_order_photos (id, work_order_id, file_id, created_at)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (work_order_id, file_id) DO NOTHING`,
+		photo.ID, photo.WorkOrderID, photo.FileID, photo.CreatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("link photo to work order: %w", err)
+	}
+	return photo, nil
+}
+
+// GetWorkOrderPhotos returns all managed files linked to the given work order.
+func (r *Repository) GetWorkOrderPhotos(workOrderID string) ([]models.ManagedFile, error) {
+	rows, err := r.DB.Query(
+		`SELECT f.id, f.sha256, f.original_name, f.mime_type, f.size_bytes, f.storage_path,
+		        f.uploaded_by, f.retention_until, f.created_at
+		 FROM managed_files f
+		 JOIN work_order_photos wop ON wop.file_id = f.id
+		 WHERE wop.work_order_id = $1
+		 ORDER BY wop.created_at`, workOrderID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get work order photos: %w", err)
+	}
+	defer rows.Close()
+
+	var files []models.ManagedFile
+	for rows.Next() {
+		var f models.ManagedFile
+		if err := rows.Scan(&f.ID, &f.SHA256, &f.OriginalName, &f.MimeType, &f.SizeBytes,
+			&f.StoragePath, &f.UploadedBy, &f.RetentionUntil, &f.CreatedAt); err != nil {
+			return nil, fmt.Errorf("get work order photos scan: %w", err)
 		}
 		files = append(files, f)
 	}

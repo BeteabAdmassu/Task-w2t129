@@ -172,16 +172,17 @@ type RateTable struct {
 	EffectiveDate     string          `json:"effective_date"`
 }
 
+// ChargeStatement lifecycle: pending → approved → paid (no direct pending→paid).
 type ChargeStatement struct {
 	ID            string     `json:"id"`
 	PeriodStart   string     `json:"period_start"`
 	PeriodEnd     string     `json:"period_end"`
 	TotalAmount   float64    `json:"total_amount"`
-	Status        string     `json:"status"`
-	ApprovedBy1   *string    `json:"approved_by_1,omitempty"`
-	ApprovedBy2   *string    `json:"approved_by_2,omitempty"`
+	ExpectedTotal float64    `json:"expected_total"`
+	Status        string     `json:"status"` // pending | approved | paid
+	ApprovedBy    *string    `json:"approved_by,omitempty"`
 	VarianceNotes *string    `json:"variance_notes,omitempty"`
-	ExportedAt    *time.Time `json:"exported_at,omitempty"`
+	PaidAt        *time.Time `json:"paid_at,omitempty"`
 	CreatedAt     time.Time  `json:"created_at"`
 }
 
@@ -194,6 +195,14 @@ type ChargeLineItem struct {
 	Surcharge   float64 `json:"surcharge"`
 	Tax         float64 `json:"tax"`
 	Total       float64 `json:"total"`
+}
+
+// WorkOrderPhoto links a managed file to a work order.
+type WorkOrderPhoto struct {
+	ID          string    `json:"id"`
+	WorkOrderID string    `json:"work_order_id"`
+	FileID      string    `json:"file_id"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type ManagedFile struct {
@@ -325,7 +334,10 @@ type AddValueRequest struct {
 }
 
 type ReconcileRequest struct {
-	VarianceNotes string `json:"variance_notes"`
+	// ExpectedTotal is the operator's expected statement amount.
+	// When ABS(TotalAmount - ExpectedTotal) > 25, VarianceNotes is required.
+	ExpectedTotal float64 `json:"expected_total"`
+	VarianceNotes string  `json:"variance_notes"`
 }
 
 // Unused import guard

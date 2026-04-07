@@ -840,12 +840,29 @@ func (h *MemberHandler) RefundStoredValue(c echo.Context) error {
 		})
 	}
 
+	// Enforce "unused-only" refund eligibility: check whether any redemption or
+	// usage transaction occurred after the latest stored_value_add.
+	for i := range transactions {
+		tx := transactions[i]
+		// Only look at transactions after the last add
+		if !tx.CreatedAt.After(latestAdd.CreatedAt) {
+			continue
+		}
+		if tx.Type == "redeem" || tx.Type == "stored_value_use" || tx.Type == "usage" {
+			return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+				Error:   "Stored value already used",
+				Code:    http.StatusBadRequest,
+				Details: "Cannot refund stored value that has already been partially or fully redeemed",
+			})
+		}
+	}
+
 	// Check member still has enough balance
 	if member.StoredValue < req.Amount {
 		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "Insufficient balance for refund",
 			Code:    http.StatusBadRequest,
-			Details: "The stored value has already been partially or fully used",
+			Details: "Refund amount exceeds current stored value balance",
 		})
 	}
 

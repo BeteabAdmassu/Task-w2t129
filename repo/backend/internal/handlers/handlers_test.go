@@ -315,3 +315,67 @@ func TestCreateMember_MissingTierID_Returns400(t *testing.T) {
 		t.Errorf("expected 400 for missing tier_id, got %d", rec.Code)
 	}
 }
+
+// ---------- Learning handler — import validation (before DB call) ----------
+
+func TestImportContent_MissingCategory_Returns400(t *testing.T) {
+	e := echo.New()
+	// multipart with title + file but no category
+	body := "--boundary\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nTest Title\r\n" +
+		"--boundary\r\nContent-Disposition: form-data; name=\"chapter_id\"\r\n\r\nsome-chapter-id\r\n" +
+		"--boundary--"
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/learning/import",
+		strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, "multipart/form-data; boundary=boundary")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	h := NewLearningHandler(nil)
+	if err := h.ImportContent(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing category, got %d", rec.Code)
+	}
+}
+
+func TestImportContent_MissingTitle_Returns400(t *testing.T) {
+	e := echo.New()
+	body := "--boundary\r\nContent-Disposition: form-data; name=\"category\"\r\n\r\nPharmacology\r\n" +
+		"--boundary\r\nContent-Disposition: form-data; name=\"chapter_id\"\r\n\r\nsome-chapter-id\r\n" +
+		"--boundary--"
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/learning/import",
+		strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, "multipart/form-data; boundary=boundary")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	h := NewLearningHandler(nil)
+	if err := h.ImportContent(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing title, got %d", rec.Code)
+	}
+}
+
+func TestImportContent_MissingFile_Returns400(t *testing.T) {
+	e := echo.New()
+	body := "--boundary\r\nContent-Disposition: form-data; name=\"category\"\r\n\r\nPharmacology\r\n" +
+		"--boundary\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nTest Title\r\n" +
+		"--boundary\r\nContent-Disposition: form-data; name=\"chapter_id\"\r\n\r\nsome-chapter-id\r\n" +
+		"--boundary--"
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/learning/import",
+		strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, "multipart/form-data; boundary=boundary")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	h := NewLearningHandler(nil)
+	if err := h.ImportContent(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing file, got %d", rec.Code)
+	}
+}

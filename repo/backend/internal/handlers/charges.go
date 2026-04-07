@@ -465,7 +465,7 @@ func (h *ChargeHandler) GenerateStatement(c echo.Context) error {
 		PeriodStart: req.PeriodStart,
 		PeriodEnd:   req.PeriodEnd,
 		TotalAmount: totalAmount,
-		Status:      "draft",
+		Status:      "pending",
 		CreatedAt:   time.Now(),
 	}
 
@@ -512,13 +512,23 @@ func (h *ChargeHandler) GenerateStatement(c echo.Context) error {
 	})
 }
 
-// statementIsReconcilable returns true only when the statement is in draft status.
-func statementIsReconcilable(status string) bool { return status == "draft" }
+// statementIsReconcilable returns true only when the statement is in pending status.
+func statementIsReconcilable(status string) bool { return status == "pending" }
 
-// statementIsApprovable returns true only when the statement is awaiting approval.
-func statementIsApprovable(status string) bool { return status == "pending_approval" }
+// statementIsApprovable returns true only when the statement is in pending status.
+func statementIsApprovable(status string) bool { return status == "pending" }
 
-// approvalStep returns 1 if the first approver slot is empty, 2 if the second is, or 0 if fully approved.
+// statementVarianceExceedsThreshold returns true when ABS(total - expected) > 25.
+// This is the correct reconciliation escalation check per the business rule.
+func statementVarianceExceedsThreshold(totalAmount, expectedTotal float64) bool {
+	diff := totalAmount - expectedTotal
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff > 25.0
+}
+
+// approvalStep returns 1 if no approver has been set, or 0 if fully approved.
 func approvalStep(approvedBy1, approvedBy2 *string) int {
 	if approvedBy1 == nil {
 		return 1
@@ -559,7 +569,7 @@ func (h *ChargeHandler) ReconcileStatement(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "Invalid statement state",
 			Code:    http.StatusBadRequest,
-			Details: "Only draft statements can be reconciled",
+			Details: "Only pending statements can be reconciled and approved",
 		})
 	}
 
@@ -571,19 +581,21 @@ func (h *ChargeHandler) ReconcileStatement(c echo.Context) error {
 		})
 	}
 
-	// Check if variance exceeds $25 and notes are required
-	if statement.TotalAmount > 25.00 && req.VarianceNotes == "" {
+	// Enforce ABS(total - expected) > 25 → variance notes required.
+	if statementVarianceExceedsThreshold(statement.TotalAmount, req.ExpectedTotal) && req.VarianceNotes == "" {
 		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "Variance notes required",
 			Code:    http.StatusBadRequest,
-			Details: "Variance notes are required when the total exceeds $25.00",
+			Details: fmt.Sprintf("Variance notes are required when ABS(total - expected) exceeds $25.00 (actual: $%.2f, expected: $%.2f)", statement.TotalAmount, req.ExpectedTotal),
 		})
 	}
 
+	statement.ExpectedTotal = req.ExpectedTotal
 	if req.VarianceNotes != "" {
 		statement.VarianceNotes = &req.VarianceNotes
 	}
-	statement.Status = "pending_approval"
+	// Reconcile transitions pending → approved.
+	statement.Status = "approved"
 
 	if err := h.repo.UpdateStatement(statement); err != nil {
 		logrus.WithError(err).Error("Failed to reconcile statement")
@@ -646,31 +658,13 @@ func (h *ChargeHandler) ApproveStatement(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "Invalid statement state",
 			Code:    http.StatusBadRequest,
-			Details: "Statement must be in pending_approval status before it can be approved",
+			Details: "Only pending statements can be approved",
 		})
 	}
 
-	if statement.ApprovedBy1 == nil {
-		// First approval — status stays pending_approval until second approval
-		statement.ApprovedBy1 = &userID
-	} else if statement.ApprovedBy2 == nil {
-		// Second approval -- must be different user
-		if *statement.ApprovedBy1 == userID {
-			return c.JSON(http.StatusForbidden, models.ErrorResponse{
-				Error:   "Cannot approve twice",
-				Code:    http.StatusForbidden,
-				Details: "The second approver must be a different user than the first",
-			})
-		}
-		statement.ApprovedBy2 = &userID
-		statement.Status = "approved"
-	} else {
-		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
-			Error:   "Statement already fully approved",
-			Code:    http.StatusBadRequest,
-			Details: "This statement has already been approved by two users",
-		})
-	}
+	// Single-step approval: pending → approved.
+	statement.ApprovedBy = &userID
+	statement.Status = "approved"
 
 	if err := h.repo.UpdateStatement(statement); err != nil {
 		logrus.WithError(err).Error("Failed to approve statement")
@@ -680,13 +674,8 @@ func (h *ChargeHandler) ApproveStatement(c echo.Context) error {
 		})
 	}
 
-	approvalStep := 1
-	if statement.ApprovedBy2 != nil {
-		approvalStep = 2
-	}
 	details, _ := json.Marshal(map[string]interface{}{
-		"statement_id":  id,
-		"approval_step": approvalStep,
+		"statement_id": id,
 	})
 	h.repo.CreateAuditLog(&models.AuditLogEntry{
 		UserID:     userID,
@@ -730,6 +719,15 @@ func (h *ChargeHandler) ExportStatement(c echo.Context) error {
 		})
 	}
 
+	// Enforce approved → paid transition (no direct pending→paid).
+	if statement.Status != "approved" {
+		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Invalid statement state",
+			Code:    http.StatusBadRequest,
+			Details: "Only approved statements can be exported and marked as paid",
+		})
+	}
+
 	lineItems, err := h.repo.GetStatementLineItems(id)
 	if err != nil {
 		logrus.WithError(err).Error("Failed to get statement line items for export")
@@ -750,7 +748,7 @@ func (h *ChargeHandler) ExportStatement(c echo.Context) error {
 		payload := map[string]interface{}{
 			"statement":  statement,
 			"line_items": lineItems,
-			"exported_at": time.Now().UTC().Format(time.RFC3339),
+			"paid_at": time.Now().UTC().Format(time.RFC3339),
 		}
 		content, err = json.Marshal(payload)
 		if err != nil {
@@ -797,9 +795,10 @@ func (h *ChargeHandler) ExportStatement(c echo.Context) error {
 	mac.Write(content)
 	signature := hex.EncodeToString(mac.Sum(nil))
 
-	// Mark statement as exported
+	// Transition approved → paid.
 	now := time.Now()
-	statement.ExportedAt = &now
+	statement.Status = "paid"
+	statement.PaidAt = &now
 	h.repo.UpdateStatement(statement)
 
 	userID := middleware.GetUserID(c)

@@ -317,6 +317,20 @@ app.whenReady().then(async () => {
       }
     },
     onNewWindow: () => createWindow(),
+    onBackup: () => {
+      // Trigger backup via the API and notify the user of success/failure.
+      fetch(`${BACKEND_URL}/api/v1/system/backup`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${global.__medopsToken ?? ''}` },
+      })
+        .then((r) => {
+          const msg = r.ok ? 'Backup completed successfully.' : 'Backup failed — check the console logs.';
+          new Notification({ title: 'MedOps Backup', body: msg }).show();
+        })
+        .catch(() => {
+          new Notification({ title: 'MedOps Backup', body: 'Backup request failed — backend may be offline.' }).show();
+        });
+    },
     onQuit: () => app.quit(),
   });
 

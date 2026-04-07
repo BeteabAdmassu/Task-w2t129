@@ -186,6 +186,8 @@ func main() {
 	wo.PUT("/:id", workOrderHandler.UpdateWorkOrder, maintenanceRole)
 	wo.POST("/:id/close", workOrderHandler.CloseWorkOrder, maintenanceRole)
 	wo.POST("/:id/rate", workOrderHandler.RateWorkOrder)
+	wo.POST("/:id/photos", workOrderHandler.LinkPhoto)
+	wo.GET("/:id/photos", workOrderHandler.GetPhotos)
 
 	// Members (front desk role)
 	mem := api.Group("/members", authMW, frontDeskRole)

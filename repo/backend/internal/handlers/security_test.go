@@ -109,17 +109,12 @@ func TestCanDownloadFile_NilUploadedBy_AdminAllowed(t *testing.T) {
 	}
 }
 
-// ─── Statement status-machine (F-004) ─────────────────────────────────────────
+// ─── Statement status-machine ─────────────────────────────────────────────────
+// Canonical states: pending → approved → paid (no direct pending→paid)
 
-func TestStatementIsReconcilable_DraftIsReconcilable(t *testing.T) {
-	if !statementIsReconcilable("draft") {
-		t.Error("'draft' statement should be reconcilable")
-	}
-}
-
-func TestStatementIsReconcilable_PendingApprovalIsNot(t *testing.T) {
-	if statementIsReconcilable("pending_approval") {
-		t.Error("'pending_approval' statement should NOT be reconcilable")
+func TestStatementIsReconcilable_PendingIsReconcilable(t *testing.T) {
+	if !statementIsReconcilable("pending") {
+		t.Error("'pending' statement should be reconcilable")
 	}
 }
 
@@ -129,27 +124,58 @@ func TestStatementIsReconcilable_ApprovedIsNot(t *testing.T) {
 	}
 }
 
-func TestStatementIsReconcilable_ExportedIsNot(t *testing.T) {
-	if statementIsReconcilable("exported") {
-		t.Error("'exported' statement should NOT be reconcilable")
+func TestStatementIsReconcilable_PaidIsNot(t *testing.T) {
+	if statementIsReconcilable("paid") {
+		t.Error("'paid' statement should NOT be reconcilable")
 	}
 }
 
-func TestStatementIsApprovable_PendingApprovalIsApprovable(t *testing.T) {
-	if !statementIsApprovable("pending_approval") {
-		t.Error("'pending_approval' statement should be approvable")
-	}
-}
-
-func TestStatementIsApprovable_DraftIsNot(t *testing.T) {
-	if statementIsApprovable("draft") {
-		t.Error("'draft' statement should NOT be directly approvable (must reconcile first)")
+func TestStatementIsApprovable_PendingIsApprovable(t *testing.T) {
+	if !statementIsApprovable("pending") {
+		t.Error("'pending' statement should be approvable")
 	}
 }
 
 func TestStatementIsApprovable_ApprovedIsNot(t *testing.T) {
 	if statementIsApprovable("approved") {
 		t.Error("'approved' statement should NOT be approvable again")
+	}
+}
+
+func TestStatementIsApprovable_PaidIsNot(t *testing.T) {
+	if statementIsApprovable("paid") {
+		t.Error("'paid' statement should NOT be approvable")
+	}
+}
+
+// ─── Variance threshold (reconciliation rule) ─────────────────────────────────
+
+func TestVarianceThreshold_ExactlyAtBoundary_NotExceeded(t *testing.T) {
+	// ABS(100 - 75) = 25 — equals threshold, must NOT require notes
+	if statementVarianceExceedsThreshold(100, 75) {
+		t.Error("variance of exactly 25 should NOT exceed the threshold")
+	}
+}
+
+func TestVarianceThreshold_OneAboveBoundary_Exceeded(t *testing.T) {
+	// ABS(100 - 74.99) = 25.01 — exceeds threshold
+	if !statementVarianceExceedsThreshold(100, 74.99) {
+		t.Error("variance of 25.01 should exceed the threshold")
+	}
+}
+
+func TestVarianceThreshold_NegativeDelta_UsesAbsoluteValue(t *testing.T) {
+	// ABS(74.99 - 100) = 25.01 — direction does not matter
+	if !statementVarianceExceedsThreshold(74.99, 100) {
+		t.Error("negative variance of 25.01 should exceed the threshold (ABS required)")
+	}
+}
+
+func TestVarianceThreshold_TotalExceeds25_ButCloseToExpected_NotFlagged(t *testing.T) {
+	// Old buggy check: total > 25 would flag this incorrectly.
+	// New correct check: ABS(1000 - 999) = 1, which is fine.
+	if statementVarianceExceedsThreshold(1000, 999) {
+		t.Error("total > 25 alone should NOT trigger threshold; only ABS(diff) > 25 should")
 	}
 }
 

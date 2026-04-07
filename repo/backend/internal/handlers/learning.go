@@ -508,23 +508,32 @@ func (h *LearningHandler) SearchKnowledgePoints(c echo.Context) error {
 	})
 }
 
-// ImportContent accepts a file upload (markdown/html) and creates a knowledge point from it.
+// ImportContent accepts a multipart file upload and creates a knowledge point.
+// Required fields: file, category, title.
 func (h *LearningHandler) ImportContent(c echo.Context) error {
 	chapterID := c.FormValue("chapter_id")
+	category := c.FormValue("category")
 	title := c.FormValue("title")
 
-	if chapterID == "" {
+	if category == "" {
 		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "Validation failed",
 			Code:    http.StatusBadRequest,
-			Details: "Chapter ID is required",
+			Details: "category is required",
 		})
 	}
 	if title == "" {
 		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "Validation failed",
 			Code:    http.StatusBadRequest,
-			Details: "Title is required",
+			Details: "title is required",
+		})
+	}
+	if chapterID == "" {
+		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Validation failed",
+			Code:    http.StatusBadRequest,
+			Details: "chapter_id is required",
 		})
 	}
 
@@ -576,6 +585,8 @@ func (h *LearningHandler) ImportContent(c echo.Context) error {
 	} else {
 		tags = []string{}
 	}
+	// Prepend category as a structured tag so it is stored and queryable.
+	tags = append([]string{"category:" + category}, tags...)
 
 	now := time.Now()
 	kp := &models.KnowledgePoint{

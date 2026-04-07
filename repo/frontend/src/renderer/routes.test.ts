@@ -151,34 +151,51 @@ describe('Role-protected route consistency', () => {
 // ─── Statement status-machine labels ─────────────────────────────────────────
 // Mirrors the DB CHECK constraint: (draft, pending_approval, approved, exported)
 
-const VALID_STATEMENT_STATUSES = ['draft', 'pending_approval', 'approved', 'exported'];
+// Canonical statement states: pending → approved → paid (no direct pending→paid)
+const VALID_STATEMENT_STATUSES = ['pending', 'approved', 'paid'];
 
 function statementStatusLabel(status: string): string {
   const map: Record<string, string> = {
-    draft:            'Draft',
-    pending_approval: 'Pending Approval',
-    approved:         'Approved',
-    exported:         'Exported',
+    pending:  'Pending',
+    approved: 'Approved',
+    paid:     'Paid',
   };
   return map[status] ?? status;
 }
 
 describe('Statement status labels align with DB enum', () => {
   for (const status of VALID_STATEMENT_STATUSES) {
-    it(`status "${status}" produces a non-raw label`, () => {
+    it(`status "${status}" has a human-readable label`, () => {
       const label = statementStatusLabel(status);
-      expect(label).not.toBe(status); // should be human-readable
       expect(label.length).toBeGreaterThan(0);
+      // Labels must differ from raw enum value (Pending vs pending, etc.)
+      expect(label[0]).toBe(label[0].toUpperCase());
     });
   }
 
-  it('does not produce a label for "reconciled" (invalid DB status)', () => {
-    // "reconciled" was removed from the handler — it must not appear in valid set
-    expect(VALID_STATEMENT_STATUSES).not.toContain('reconciled');
+  it('state set has exactly 3 canonical states', () => {
+    expect(VALID_STATEMENT_STATUSES).toHaveLength(3);
   });
 
-  it('does not produce a label for "pending_approval_2" (invalid DB status)', () => {
-    expect(VALID_STATEMENT_STATUSES).not.toContain('pending_approval_2');
+  it('does not include legacy "draft" state', () => {
+    expect(VALID_STATEMENT_STATUSES).not.toContain('draft');
+  });
+
+  it('does not include legacy "pending_approval" state', () => {
+    expect(VALID_STATEMENT_STATUSES).not.toContain('pending_approval');
+  });
+
+  it('does not include legacy "exported" state', () => {
+    expect(VALID_STATEMENT_STATUSES).not.toContain('exported');
+  });
+
+  it('enforces pending → approved → paid ordering', () => {
+    expect(VALID_STATEMENT_STATUSES.indexOf('pending')).toBeLessThan(
+      VALID_STATEMENT_STATUSES.indexOf('approved'),
+    );
+    expect(VALID_STATEMENT_STATUSES.indexOf('approved')).toBeLessThan(
+      VALID_STATEMENT_STATUSES.indexOf('paid'),
+    );
   });
 });
 

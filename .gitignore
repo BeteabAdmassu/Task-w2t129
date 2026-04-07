@@ -1,4 +1,4 @@
-.tmp/
+.tmp2/
 node_modules/
 __pycache__/
 .env

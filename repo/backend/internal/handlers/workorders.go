@@ -408,6 +408,7 @@ func (h *WorkOrderHandler) CloseWorkOrder(c echo.Context) error {
 }
 
 // RateWorkOrder rates a completed work order.
+// Only the original submitter may rate their own work order.
 func (h *WorkOrderHandler) RateWorkOrder(c echo.Context) error {
 	id := c.Param("id")
 	if id == "" {
@@ -423,6 +424,17 @@ func (h *WorkOrderHandler) RateWorkOrder(c echo.Context) error {
 			Error:   "Work order not found",
 			Code:    http.StatusNotFound,
 			Details: "No work order found with the given ID",
+		})
+	}
+
+	// Object-level authorization: only the submitter may rate their own work order.
+	userID := middleware.GetUserID(c)
+	role := middleware.GetUserRole(c)
+	if role != "system_admin" && wo.SubmittedBy != userID {
+		return c.JSON(http.StatusForbidden, models.ErrorResponse{
+			Error:   "Access denied",
+			Code:    http.StatusForbidden,
+			Details: "Only the work order submitter may rate this work order",
 		})
 	}
 
@@ -459,7 +471,6 @@ func (h *WorkOrderHandler) RateWorkOrder(c echo.Context) error {
 		})
 	}
 
-	userID := middleware.GetUserID(c)
 	details, _ := json.Marshal(map[string]interface{}{
 		"wo_id":  id,
 		"rating": req.Rating,
@@ -479,6 +490,77 @@ func (h *WorkOrderHandler) RateWorkOrder(c echo.Context) error {
 	}).Info("Work order rated")
 
 	return c.JSON(http.StatusOK, wo)
+}
+
+// LinkPhoto links an already-uploaded managed file to a work order.
+// POST /work-orders/:id/photos  { "file_id": "<uuid>" }
+func (h *WorkOrderHandler) LinkPhoto(c echo.Context) error {
+	woID := c.Param("id")
+	if woID == "" {
+		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error: "Work order ID is required",
+			Code:  http.StatusBadRequest,
+		})
+	}
+
+	wo, err := h.repo.GetWorkOrderByID(woID)
+	if err != nil || wo == nil {
+		return c.JSON(http.StatusNotFound, models.ErrorResponse{
+			Error: "Work order not found",
+			Code:  http.StatusNotFound,
+		})
+	}
+
+	var body struct {
+		FileID string `json:"file_id"`
+	}
+	if err := c.Bind(&body); err != nil || body.FileID == "" {
+		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Validation failed",
+			Code:    http.StatusBadRequest,
+			Details: "file_id is required",
+		})
+	}
+
+	photo, err := h.repo.LinkPhotoToWorkOrder(woID, body.FileID)
+	if err != nil {
+		logrus.WithError(err).Error("Failed to link photo to work order")
+		return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error: "Failed to link photo",
+			Code:  http.StatusInternalServerError,
+		})
+	}
+
+	userID := middleware.GetUserID(c)
+	details, _ := json.Marshal(map[string]string{"wo_id": woID, "file_id": body.FileID})
+	h.repo.CreateAuditLog(&models.AuditLogEntry{
+		UserID: userID, Action: "link_photo", EntityType: "work_order", EntityID: woID, Details: details,
+	})
+
+	return c.JSON(http.StatusCreated, photo)
+}
+
+// GetPhotos returns all files linked to a work order.
+// GET /work-orders/:id/photos
+func (h *WorkOrderHandler) GetPhotos(c echo.Context) error {
+	woID := c.Param("id")
+	if woID == "" {
+		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error: "Work order ID is required",
+			Code:  http.StatusBadRequest,
+		})
+	}
+
+	photos, err := h.repo.GetWorkOrderPhotos(woID)
+	if err != nil {
+		logrus.WithError(err).Error("Failed to get work order photos")
+		return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error: "Failed to retrieve photos",
+			Code:  http.StatusInternalServerError,
+		})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{"data": photos})
 }
 
 // GetAnalytics returns work order analytics.
