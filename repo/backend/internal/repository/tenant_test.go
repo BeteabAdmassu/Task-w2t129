@@ -1,35 +1,45 @@
 // Package repository — tenant isolation tests.
 //
-// Strategy: register a lightweight capturing sql.Driver that records every SQL
-// statement executed against it.  Each test builds a Repository pointed at
-// that driver, calls the method under test, then asserts that the captured
-// query contained a tenant_id constraint.
+// Strategy: register a lightweight capturing sql.Driver (standard library only,
+// no external dependencies) that records every SQL statement and its bound
+// arguments.  Each test builds a Repository pointed at that driver, calls the
+// method under test, then asserts:
 //
-// Because the driver returns no rows, the repository functions will return
-// sql.ErrNoRows (nil, nil) or a scan error — both are acceptable; we only care
-// that the SQL was constructed with a tenant predicate before any DB round-trip.
+//  1. The SQL string sent to the DB contains "tenant_id" — structural check.
+//  2. The tenant ID value configured on the Repository is present in the bound
+//     args — behavioural check that would fail if the arg were removed or
+//     swapped to a hardcoded literal.
 //
-// No external dependencies are needed: everything is standard-library only.
+// Because the driver returns no rows the repository functions return
+// sql.ErrNoRows / a scan error — this is expected and does not affect the test
+// assertions; we only care what SQL+args arrived at the driver before any result
+// was processed.
 
 package repository_test
 
 import (
 	"database/sql"
 	"database/sql/driver"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
 	"testing"
 
+	"medops/internal/models"
 	"medops/internal/repository"
 )
 
 // ─── Capturing sql Driver ─────────────────────────────────────────────────────
 
-// capturedSQL records the raw SQL strings sent to the driver.
+type executedQuery struct {
+	sql  string
+	args []driver.Value
+}
+
 type capturedSQL struct {
 	mu      sync.Mutex
-	queries []string
+	queries []executedQuery
 }
 
 func (c *capturedSQL) reset() {
@@ -38,55 +48,91 @@ func (c *capturedSQL) reset() {
 	c.mu.Unlock()
 }
 
-func (c *capturedSQL) all() []string {
+func (c *capturedSQL) snapshot() []executedQuery {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]string, len(c.queries))
+	out := make([]executedQuery, len(c.queries))
 	copy(out, c.queries)
 	return out
 }
 
-func (c *capturedSQL) anyContains(sub string) bool {
-	for _, q := range c.all() {
-		if strings.Contains(q, sub) {
+// sqlContains returns true if any captured query's SQL holds sub.
+func (c *capturedSQL) sqlContains(sub string) bool {
+	for _, q := range c.snapshot() {
+		if strings.Contains(q.sql, sub) {
 			return true
 		}
 	}
 	return false
 }
 
-// capDriver implements driver.Driver.
-type capDriver struct{ captured *capturedSQL }
+// argContains returns true if any captured query passed value v as a bound arg.
+func (c *capturedSQL) argContains(v string) bool {
+	for _, q := range c.snapshot() {
+		for _, a := range q.args {
+			if fmt.Sprintf("%v", a) == v {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// minPlaceholders returns true if any captured SQL has at least n "$" placeholders.
+func (c *capturedSQL) minPlaceholders(n int) bool {
+	for _, q := range c.snapshot() {
+		if strings.Count(q.sql, "$") >= n {
+			return true
+		}
+	}
+	return false
+}
+
+// ─── Driver / Conn / Stmt / Rows / Tx implementations ────────────────────────
+
+type capDriver struct{ cap *capturedSQL }
 
 func (d *capDriver) Open(_ string) (driver.Conn, error) {
 	return &capConn{d: d}, nil
 }
 
-// capConn implements driver.Conn.
 type capConn struct{ d *capDriver }
 
 func (c *capConn) Prepare(query string) (driver.Stmt, error) {
-	c.d.captured.mu.Lock()
-	c.d.captured.queries = append(c.d.captured.queries, query)
-	c.d.captured.mu.Unlock()
-	return &capStmt{}, nil
+	return &capStmt{conn: c, sql: query}, nil
 }
-func (c *capConn) Close() error                  { return nil }
-func (c *capConn) Begin() (driver.Tx, error)     { return &capTx{}, nil }
+func (c *capConn) Close() error              { return nil }
+func (c *capConn) Begin() (driver.Tx, error) { return &capTx{}, nil }
 
-// capStmt implements driver.Stmt.
-type capStmt struct{}
+type capStmt struct {
+	conn *capConn
+	sql  string
+}
 
-func (s *capStmt) Close() error                                    { return nil }
-func (s *capStmt) NumInput() int                                   { return -1 } // variadic
-func (s *capStmt) Exec(_ []driver.Value) (driver.Result, error)   { return driver.RowsAffected(0), nil }
-func (s *capStmt) Query(_ []driver.Value) (driver.Rows, error)    { return &capRows{}, nil }
+func (s *capStmt) Close() error    { return nil }
+func (s *capStmt) NumInput() int   { return -1 } // variadic — no check
 
-// capRows implements driver.Rows — always empty.
+func (s *capStmt) record(args []driver.Value) {
+	s.conn.d.cap.mu.Lock()
+	s.conn.d.cap.queries = append(s.conn.d.cap.queries, executedQuery{sql: s.sql, args: args})
+	s.conn.d.cap.mu.Unlock()
+}
+
+func (s *capStmt) Exec(args []driver.Value) (driver.Result, error) {
+	s.record(args)
+	return driver.RowsAffected(0), nil
+}
+
+func (s *capStmt) Query(args []driver.Value) (driver.Rows, error) {
+	s.record(args)
+	return &capRows{}, nil
+}
+
+// capRows — always empty so Scan immediately gets ErrNoRows / EOF.
 type capRows struct{ done bool }
 
-func (r *capRows) Columns() []string              { return []string{} }
-func (r *capRows) Close() error                   { return nil }
+func (r *capRows) Columns() []string { return []string{} }
+func (r *capRows) Close() error      { return nil }
 func (r *capRows) Next(_ []driver.Value) error {
 	if r.done {
 		return io.EOF
@@ -95,7 +141,6 @@ func (r *capRows) Next(_ []driver.Value) error {
 	return io.EOF
 }
 
-// capTx implements driver.Tx.
 type capTx struct{}
 
 func (t *capTx) Commit() error   { return nil }
@@ -103,28 +148,30 @@ func (t *capTx) Rollback() error { return nil }
 
 // ─── Test harness ─────────────────────────────────────────────────────────────
 
+const (
+	testDriverName = "capture-tenant-v2"
+	testTenantID   = "clinic-tenant-42"
+	// encryptKey is padded/truncated to 32 bytes internally by repository.New.
+	testEncryptKey = "test-encrypt-key-32-bytes-padding"
+)
+
 var (
 	registerOnce sync.Once
 	globalCap    = &capturedSQL{}
 	testDB       *sql.DB
 )
 
-const (
-	testDriverName = "capture-tenant-test"
-	testTenantID   = "tenant-A"
-	// encryptKey must be at least 32 bytes (padded internally by repository.New).
-	testEncryptKey = "test-encrypt-key-32-bytes-padding"
-)
-
 func openTestDB(t *testing.T) (*sql.DB, *capturedSQL) {
 	t.Helper()
 	registerOnce.Do(func() {
-		sql.Register(testDriverName, &capDriver{captured: globalCap})
+		sql.Register(testDriverName, &capDriver{cap: globalCap})
 		var err error
 		testDB, err = sql.Open(testDriverName, "")
 		if err != nil {
 			panic("capDriver open: " + err.Error())
 		}
+		// Keep a single open connection so Begin() works for transaction tests.
+		testDB.SetMaxOpenConns(1)
 	})
 	globalCap.reset()
 	return testDB, globalCap
@@ -136,128 +183,138 @@ func newRepo(t *testing.T) (*repository.Repository, *capturedSQL) {
 	return repository.New(db, testEncryptKey, testTenantID), cap
 }
 
-// assertTenantScoped fails the test if none of the captured queries contain
-// "tenant_id", confirming the method scopes results to the current tenant.
-func assertTenantScoped(t *testing.T, cap *capturedSQL, method string) {
+// ─── Assertion helpers ────────────────────────────────────────────────────────
+
+func assertSQL(t *testing.T, cap *capturedSQL, method, sub string) {
 	t.Helper()
-	if !cap.anyContains("tenant_id") {
-		t.Errorf("%s: executed query does not reference tenant_id — cross-tenant read/write is possible", method)
-		t.Logf("captured queries: %v", cap.all())
+	if !cap.sqlContains(sub) {
+		t.Errorf("%s: SQL does not contain %q\n  captured: %v", method, sub, cap.snapshot())
 	}
 }
 
-// ─── Objective 1: Tenant isolation for the 6 methods ─────────────────────────
-
-// TestGetBatch_QueryScopedToTenant verifies that GetBatch joins through skus
-// to enforce the tenant boundary on inventory_batches (which has no tenant_id).
-func TestGetBatch_QueryScopedToTenant(t *testing.T) {
-	repo, cap := newRepo(t)
-	repo.GetBatch("batch-id-1") // result doesn't matter; driver returns no rows
-	assertTenantScoped(t, cap, "GetBatch")
-}
-
-// TestListStockTransactions_QueryScopedToTenant verifies that stock_transactions
-// are read through the parent SKU's tenant_id constraint.
-func TestListStockTransactions_QueryScopedToTenant(t *testing.T) {
-	repo, cap := newRepo(t)
-	repo.ListStockTransactions("sku-id-1", 1, 20)
-	assertTenantScoped(t, cap, "ListStockTransactions")
-}
-
-// TestGetStocktake_QueryScopedToTenant verifies that stocktakes are read
-// through the creator (auth_users) tenant_id join.
-func TestGetStocktake_QueryScopedToTenant(t *testing.T) {
-	repo, cap := newRepo(t)
-	repo.GetStocktake("stocktake-id-1")
-	assertTenantScoped(t, cap, "GetStocktake")
-}
-
-// TestGetSessionPackage_QueryScopedToTenant verifies that session_packages are
-// read through the parent member's tenant_id.
-func TestGetSessionPackage_QueryScopedToTenant(t *testing.T) {
-	repo, cap := newRepo(t)
-	repo.GetSessionPackage("pkg-id-1")
-	assertTenantScoped(t, cap, "GetSessionPackage")
-}
-
-// TestGetWorkOrderPhotos_QueryScopedToTenant verifies that photo retrieval
-// scopes both managed_files and work_orders to the current tenant.
-func TestGetWorkOrderPhotos_QueryScopedToTenant(t *testing.T) {
-	repo, cap := newRepo(t)
-	repo.GetWorkOrderPhotos("wo-id-1")
-	assertTenantScoped(t, cap, "GetWorkOrderPhotos")
-}
-
-// TestDeleteFileRecord_QueryScopedToTenant verifies that DeleteFileRecord adds
-// a tenant_id predicate so a file from another tenant cannot be deleted.
-func TestDeleteFileRecord_QueryScopedToTenant(t *testing.T) {
-	repo, cap := newRepo(t)
-	repo.DeleteFileRecord("file-id-1")
-	assertTenantScoped(t, cap, "DeleteFileRecord")
-}
-
-// ─── Cross-tenant argument verification ───────────────────────────────────────
-// These tests confirm the *value* of the tenant argument sent to the driver
-// matches the tenant the Repository was configured with.
-
-// assertTenantArgPresent checks that the literal tenant ID string appears in
-// at least one of the captured queries (it will be interpolated as a parameter
-// string by the capturing driver's Prepare path).
-//
-// Note: standard database/sql passes parameters separately from the query
-// string, so we cannot check arg values through the Prepare hook alone.
-// The tests above (SQL contains "tenant_id") are therefore the canonical
-// correctness check; this helper exists to document intent.
-func assertArgCount(t *testing.T, cap *capturedSQL, method string, minArgs int) {
+func assertArg(t *testing.T, cap *capturedSQL, method, value string) {
 	t.Helper()
-	// Count the maximum $N placeholder index in the captured query.
-	for _, q := range cap.all() {
-		count := strings.Count(q, "$")
-		if count >= minArgs {
-			return
-		}
+	if !cap.argContains(value) {
+		t.Errorf("%s: tenant arg %q not found in bound arguments\n  captured: %v", method, value, cap.snapshot())
 	}
-	t.Errorf("%s: expected at least %d parameter placeholder(s) in query (tenant_id arg missing)", method, minArgs)
 }
 
-func TestGetBatch_PassesTenantArg(t *testing.T) {
-	repo, cap := newRepo(t)
-	repo.GetBatch("batch-id-1")
-	// $1 = id, $2 = tenant_id
-	assertArgCount(t, cap, "GetBatch", 2)
+func assertPlaceholders(t *testing.T, cap *capturedSQL, method string, min int) {
+	t.Helper()
+	if !cap.minPlaceholders(min) {
+		t.Errorf("%s: expected ≥%d '$' placeholders in SQL (tenant arg missing?)", method, min)
+	}
 }
 
-func TestListStockTransactions_PassesTenantArg(t *testing.T) {
+// ─── Tests: 6 methods from audit Objective 1 ─────────────────────────────────
+
+func TestGetBatch_TenantScoped(t *testing.T) {
 	repo, cap := newRepo(t)
-	repo.ListStockTransactions("sku-id-1", 1, 20)
-	// $1=skuID $2=pageSize $3=offset $4=tenantID
-	assertArgCount(t, cap, "ListStockTransactions", 4)
+	repo.GetBatch("batch-1")
+	assertSQL(t, cap, "GetBatch", "tenant_id")
+	assertArg(t, cap, "GetBatch", testTenantID)
+	assertPlaceholders(t, cap, "GetBatch", 2)
 }
 
-func TestGetStocktake_PassesTenantArg(t *testing.T) {
+func TestListStockTransactions_TenantScoped(t *testing.T) {
 	repo, cap := newRepo(t)
-	repo.GetStocktake("st-id-1")
-	// $1=id $2=tenantID
-	assertArgCount(t, cap, "GetStocktake", 2)
+	repo.ListStockTransactions("sku-1", 1, 20)
+	assertSQL(t, cap, "ListStockTransactions", "tenant_id")
+	assertArg(t, cap, "ListStockTransactions", testTenantID)
 }
 
-func TestGetSessionPackage_PassesTenantArg(t *testing.T) {
+func TestGetStocktake_TenantScoped(t *testing.T) {
 	repo, cap := newRepo(t)
-	repo.GetSessionPackage("pkg-id-1")
-	// $1=id $2=tenantID
-	assertArgCount(t, cap, "GetSessionPackage", 2)
+	repo.GetStocktake("st-1")
+	assertSQL(t, cap, "GetStocktake", "tenant_id")
+	assertArg(t, cap, "GetStocktake", testTenantID)
+	assertPlaceholders(t, cap, "GetStocktake", 2)
 }
 
-func TestGetWorkOrderPhotos_PassesTenantArg(t *testing.T) {
+func TestGetSessionPackage_TenantScoped(t *testing.T) {
 	repo, cap := newRepo(t)
-	repo.GetWorkOrderPhotos("wo-id-1")
-	// $1=workOrderID $2=tenantID (used twice)
-	assertArgCount(t, cap, "GetWorkOrderPhotos", 2)
+	repo.GetSessionPackage("pkg-1")
+	assertSQL(t, cap, "GetSessionPackage", "tenant_id")
+	assertArg(t, cap, "GetSessionPackage", testTenantID)
+	assertPlaceholders(t, cap, "GetSessionPackage", 2)
 }
 
-func TestDeleteFileRecord_PassesTenantArg(t *testing.T) {
+func TestGetWorkOrderPhotos_TenantScoped(t *testing.T) {
 	repo, cap := newRepo(t)
-	repo.DeleteFileRecord("file-id-1")
-	// $1=id $2=tenantID
-	assertArgCount(t, cap, "DeleteFileRecord", 2)
+	repo.GetWorkOrderPhotos("wo-1")
+	assertSQL(t, cap, "GetWorkOrderPhotos", "tenant_id")
+	assertArg(t, cap, "GetWorkOrderPhotos", testTenantID)
+}
+
+func TestDeleteFileRecord_TenantScoped(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.DeleteFileRecord("file-1")
+	assertSQL(t, cap, "DeleteFileRecord", "tenant_id")
+	assertArg(t, cap, "DeleteFileRecord", testTenantID)
+	assertPlaceholders(t, cap, "DeleteFileRecord", 2)
+}
+
+// ─── Tests: methods fixed in follow-up recommendations ───────────────────────
+
+func TestGetBatchesBySKU_TenantScoped(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.GetBatchesBySKU("sku-1")
+	assertSQL(t, cap, "GetBatchesBySKU", "tenant_id")
+	assertArg(t, cap, "GetBatchesBySKU", testTenantID)
+}
+
+func TestCompleteStocktake_TenantScoped(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.CompleteStocktake("st-1")
+	assertSQL(t, cap, "CompleteStocktake", "tenant_id")
+	assertArg(t, cap, "CompleteStocktake", testTenantID)
+	assertPlaceholders(t, cap, "CompleteStocktake", 2)
+}
+
+// TestUpdateStocktakeLines_TenantGuard verifies that the method sends a
+// tenant-scoped ownership check before modifying stocktake lines.
+func TestUpdateStocktakeLines_TenantGuard(t *testing.T) {
+	repo, cap := newRepo(t)
+	// The ownership check will return "not found" (empty rows), so the function
+	// returns an error — that's expected.  We only assert on the SQL sent.
+	repo.UpdateStocktakeLines("st-1", nil)
+	assertSQL(t, cap, "UpdateStocktakeLines", "tenant_id")
+	assertArg(t, cap, "UpdateStocktakeLines", testTenantID)
+}
+
+func TestCreateStocktake_TenantPersisted(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.CreateStocktake(&models.Stocktake{})
+	assertSQL(t, cap, "CreateStocktake", "tenant_id")
+	assertArg(t, cap, "CreateStocktake", testTenantID)
+}
+
+func TestCreateStockTransaction_TenantPersisted(t *testing.T) {
+	repo, cap := newRepo(t)
+	repo.CreateStockTransaction(&models.StockTransaction{})
+	assertSQL(t, cap, "CreateStockTransaction", "tenant_id")
+	assertArg(t, cap, "CreateStockTransaction", testTenantID)
+}
+
+// ─── Isolation invariant: different tenant IDs produce different bound args ───
+
+// TestTenantArgIsConfiguredValue fails if the repository passes a hardcoded
+// string (e.g. "default") instead of the runtime-configured tenant ID.
+func TestTenantArgIsConfiguredValue(t *testing.T) {
+	db, _ := openTestDB(t)
+	cap := globalCap // already reset by openTestDB
+
+	const specificTenant = "hospital-unit-7"
+	repo := repository.New(db, testEncryptKey, specificTenant)
+
+	cap.reset()
+	repo.GetStocktake("st-x")
+
+	if !cap.argContains(specificTenant) {
+		t.Errorf("GetStocktake bound arg should be %q (the configured tenant), got: %v",
+			specificTenant, cap.snapshot())
+	}
+	if cap.argContains(testTenantID) {
+		t.Errorf("GetStocktake must not pass previous repo's tenant %q", testTenantID)
+	}
 }

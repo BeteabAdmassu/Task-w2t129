@@ -346,11 +346,14 @@ func (r *Repository) GetLowStockSKUs() ([]models.SKU, error) {
 
 // ---------- Batches ----------
 
-// GetBatchesBySKU retrieves all batches for a given SKU, ordered by expiration date.
+// GetBatchesBySKU retrieves all batches for a given SKU, scoped to the current tenant via the parent SKU.
 func (r *Repository) GetBatchesBySKU(skuID string) ([]models.InventoryBatch, error) {
 	rows, err := r.DB.Query(
-		`SELECT id, sku_id, lot_number, expiration_date, quantity_on_hand, created_at
-		 FROM inventory_batches WHERE sku_id = $1 ORDER BY expiration_date`, skuID,
+		`SELECT b.id, b.sku_id, b.lot_number, b.expiration_date, b.quantity_on_hand, b.created_at
+		 FROM inventory_batches b
+		 JOIN skus s ON s.id = b.sku_id AND s.tenant_id = $2
+		 WHERE b.sku_id = $1
+		 ORDER BY b.expiration_date`, skuID, r.tenantID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get batches by sku: %w", err)
@@ -424,9 +427,9 @@ func (r *Repository) CreateStockTransaction(tx *models.StockTransaction) error {
 	}
 	tx.CreatedAt = time.Now()
 	_, err := r.DB.Exec(
-		`INSERT INTO stock_transactions (id, sku_id, batch_id, type, quantity, reason_code, prescription_id, performed_by, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		tx.ID, tx.SKUID, tx.BatchID, tx.Type, tx.Quantity, tx.ReasonCode, tx.PrescriptionID, tx.PerformedBy, tx.CreatedAt,
+		`INSERT INTO stock_transactions (id, sku_id, batch_id, type, quantity, reason_code, prescription_id, performed_by, created_at, tenant_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		tx.ID, tx.SKUID, tx.BatchID, tx.Type, tx.Quantity, tx.ReasonCode, tx.PrescriptionID, tx.PerformedBy, tx.CreatedAt, r.tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("create stock transaction: %w", err)
@@ -437,15 +440,13 @@ func (r *Repository) CreateStockTransaction(tx *models.StockTransaction) error {
 // ListStockTransactions returns paginated stock transactions for a SKU.
 func (r *Repository) ListStockTransactions(skuID string, page, pageSize int) ([]models.StockTransaction, int, error) {
 	offset := (page - 1) * pageSize
-	// stock_transactions has no tenant_id; scope via the parent SKU's tenant_id.
 	rows, err := r.DB.Query(
-		`SELECT st.id, st.sku_id, st.batch_id, st.type, st.quantity, st.reason_code,
-		        st.prescription_id, st.performed_by, st.created_at,
+		`SELECT id, sku_id, batch_id, type, quantity, reason_code,
+		        prescription_id, performed_by, created_at,
 		        COUNT(*) OVER() AS total
-		 FROM stock_transactions st
-		 JOIN skus s ON s.id = st.sku_id AND s.tenant_id = $4
-		 WHERE st.sku_id = $1
-		 ORDER BY st.created_at DESC
+		 FROM stock_transactions
+		 WHERE sku_id = $1 AND tenant_id = $4
+		 ORDER BY created_at DESC
 		 LIMIT $2 OFFSET $3`, skuID, pageSize, offset, r.tenantID,
 	)
 	if err != nil {
@@ -474,9 +475,9 @@ func (r *Repository) CreateStocktake(st *models.Stocktake) error {
 	}
 	st.CreatedAt = time.Now()
 	_, err := r.DB.Exec(
-		`INSERT INTO stocktakes (id, period_start, period_end, status, created_by, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		st.ID, st.PeriodStart, st.PeriodEnd, st.Status, st.CreatedBy, st.CreatedAt,
+		`INSERT INTO stocktakes (id, period_start, period_end, status, created_by, created_at, tenant_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		st.ID, st.PeriodStart, st.PeriodEnd, st.Status, st.CreatedBy, st.CreatedAt, r.tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("create stocktake: %w", err)
@@ -487,12 +488,9 @@ func (r *Repository) CreateStocktake(st *models.Stocktake) error {
 // GetStocktake retrieves a stocktake by ID, including its lines.
 func (r *Repository) GetStocktake(id string) (*models.Stocktake, error) {
 	st := &models.Stocktake{}
-	// stocktakes has no tenant_id column; scope via the creator's tenant_id in auth_users.
 	err := r.DB.QueryRow(
-		`SELECT st.id, st.period_start, st.period_end, st.status, st.created_by, st.created_at
-		 FROM stocktakes st
-		 JOIN auth_users u ON u.id = st.created_by AND u.tenant_id = $2
-		 WHERE st.id = $1`, id, r.tenantID,
+		`SELECT id, period_start, period_end, status, created_by, created_at
+		 FROM stocktakes WHERE id = $1 AND tenant_id = $2`, id, r.tenantID,
 	).Scan(&st.ID, &st.PeriodStart, &st.PeriodEnd, &st.Status, &st.CreatedBy, &st.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -532,6 +530,18 @@ func (r *Repository) UpdateStocktakeLines(stocktakeID string, lines []models.Sto
 	}
 	defer dbTx.Rollback()
 
+	// Guard: confirm the stocktake belongs to this tenant before writing.
+	var exists bool
+	if err := dbTx.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM stocktakes WHERE id = $1 AND tenant_id = $2)`,
+		stocktakeID, r.tenantID,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("check stocktake tenant: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("stocktake %s not found for current tenant", stocktakeID)
+	}
+
 	// Remove existing lines
 	if _, err := dbTx.Exec(`DELETE FROM stocktake_lines WHERE stocktake_id = $1`, stocktakeID); err != nil {
 		return fmt.Errorf("delete stocktake lines: %w", err)
@@ -556,10 +566,11 @@ func (r *Repository) UpdateStocktakeLines(stocktakeID string, lines []models.Sto
 	return dbTx.Commit()
 }
 
-// CompleteStocktake marks a stocktake as completed.
+// CompleteStocktake marks a stocktake as completed, scoped to the current tenant.
 func (r *Repository) CompleteStocktake(id string) error {
 	_, err := r.DB.Exec(
-		`UPDATE stocktakes SET status = 'completed' WHERE id = $1`, id,
+		`UPDATE stocktakes SET status = 'completed' WHERE id = $1 AND tenant_id = $2`,
+		id, r.tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("complete stocktake: %w", err)

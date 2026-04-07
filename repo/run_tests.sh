@@ -133,11 +133,28 @@ else
     fail "Password change status code" "Expected 204, got $PWCHANGE_CODE"
 fi
 
-# Re-login with new password
+# Re-login with new password, then immediately restore original password
 LOGIN_RES3=$(curl -sf -X POST "${API_URL}/auth/login" \
     -H "Content-Type: application/json" \
     -d '{"username":"admin","password":"Admin123!New"}')
 TOKEN=$(echo "$LOGIN_RES3" | jq -r '.token')
+AUTH_HEADER="Authorization: Bearer $TOKEN"
+
+# Restore original password so subsequent tests and re-runs use a known credential
+PWRESTORE_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "${API_URL}/auth/password" \
+    -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+    -d '{"current_password":"Admin123!New","new_password":"Admin123!"}')
+if [ "$PWRESTORE_CODE" -eq 204 ]; then
+    pass "Admin password restored to original"
+else
+    fail "Admin password restore" "Expected 204, got $PWRESTORE_CODE"
+fi
+
+# Re-login with restored original password
+LOGIN_RES4=$(curl -sf -X POST "${API_URL}/auth/login" \
+    -H "Content-Type: application/json" \
+    -d '{"username":"admin","password":"Admin123!"}')
+TOKEN=$(echo "$LOGIN_RES4" | jq -r '.token')
 AUTH_HEADER="Authorization: Bearer $TOKEN"
 
 # ---- User Management ----
