@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod +x:*)",
+      "Bash(wc:*)",
+      "Bash(python3 -c \"import bcrypt; print\\(bcrypt.hashpw\\(b'AdminPass1234', bcrypt.gensalt\\(10\\)\\).decode\\(\\)\\)\")",
+      "Bash(docker compose:*)",
+      "Bash(find . \\\\\\( -name \"*.go\" -o -name \"*.tsx\" -o -name \"*.ts\" -o -name \"*.sql\" \\\\\\) ! -path \"./.git/*\" ! -path \"*/node_modules/*\" -exec cat {} +)"
+    ]
+  }
+}
