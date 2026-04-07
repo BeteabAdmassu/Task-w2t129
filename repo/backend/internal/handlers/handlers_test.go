@@ -359,6 +359,35 @@ func TestImportContent_MissingTitle_Returns400(t *testing.T) {
 	}
 }
 
+func TestImportContent_MissingChapterID_Returns400(t *testing.T) {
+	e := echo.New()
+	// category + title present but no chapter_id
+	body := "--boundary\r\nContent-Disposition: form-data; name=\"category\"\r\n\r\nPharmacology\r\n" +
+		"--boundary\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nTest Title\r\n" +
+		"--boundary--"
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/learning/import",
+		strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, "multipart/form-data; boundary=boundary")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	h := NewLearningHandler(nil)
+	if err := h.ImportContent(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing chapter_id, got %d", rec.Code)
+	}
+
+	var body2 map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body2); err != nil {
+		t.Fatalf("failed to parse response body: %v", err)
+	}
+	if body2["error"] == nil {
+		t.Error("expected error field in response body")
+	}
+}
+
 func TestImportContent_MissingFile_Returns400(t *testing.T) {
 	e := echo.New()
 	body := "--boundary\r\nContent-Disposition: form-data; name=\"category\"\r\n\r\nPharmacology\r\n" +

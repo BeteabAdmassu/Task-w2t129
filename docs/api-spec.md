@@ -111,7 +111,7 @@ Response includes:
 | POST | /learning/knowledge-points | Learning | Create | `{chapter_id, title, content, tags[], classifications}` | `{knowledge_point}` | 400 |
 | PUT | /learning/knowledge-points/:id | Learning | Update | partial fields | `{knowledge_point}` | 404 |
 | GET | /learning/search | Any | Full-text search | query: `?q=` | `{data[], pagination}` | — |
-| POST | /learning/import | Learning | Import file | multipart: file + metadata | `{knowledge_point}` | 400 |
+| POST | /learning/import | Learning | Import file | multipart: `file` (required), `category` (required), `title` (required), `chapter_id` (required) | `{knowledge_point}` | 400 |
 | GET | /learning/export/:id | Learning | Export | query: `?format=md|html` | file download | 404 |
 
 ### Work Orders
@@ -153,9 +153,9 @@ Response includes:
 | GET | /statements | Admin | List | query: `?status=&from=&to=` | `{data[], pagination}` | — |
 | POST | /statements/generate | Admin | Generate | `{period_start, period_end}` | `{statement}` | 400 |
 | GET | /statements/:id | Admin | Detail + lines | — | `{statement, line_items[]}` | 404 |
-| POST | /statements/:id/reconcile | Admin | Reconcile | `{variance_notes}` (required if delta>$25) | `{statement}` | 400 |
-| POST | /statements/:id/approve | Admin | Approve step | — | `{statement}` | 400 (already approved by this user) |
-| POST | /statements/:id/export | Admin | Export signed | query: `?format=csv|json` | file download + .sig | 400 |
+| POST | /statements/:id/reconcile | Admin | Reconcile & approve (`pending`→`approved`) | `{expected_total, variance_notes?}` — `variance_notes` required if ABS(total-expected)>$25 | `{statement}` | 400 |
+| POST | /statements/:id/approve | Admin | Approve (alias, same state transition as reconcile) | — | `{statement}` | 400 |
+| POST | /statements/:id/export | Admin | Export & mark paid (`approved`→`paid`) | query: `?format=csv\|json` | file download | 400 (if not `approved`) |
 
 ### Files
 
@@ -181,7 +181,7 @@ Response includes:
 
 | Method | Path | Auth | Description | Request Body | Response | Errors |
 |--------|------|------|-------------|-------------|----------|--------|
-| PUT | /drafts/:formType | Yes | Save checkpoint | `{form_id?, state}` | `{draft}` | 400 |
-| GET | /drafts | Yes | List user drafts | — | `{data[]}` | — |
-| GET | /drafts/:formType/:formId | Yes | Get draft | — | `{draft}` | 404 |
-| DELETE | /drafts/:formType/:formId | Yes | Delete draft | — | 204 | 404 |
+| PUT | /drafts/:formType | Yes | Save/upsert checkpoint — `formType` comes from the URL path, not the body | `{form_id?, state_json}` | `{draft}` | 400 |
+| GET | /drafts | Yes | List user's drafts | — | `{data[]}` | — |
+| GET | /drafts/:formType/:formId | Yes | Get draft by (user, formType, formId) — `formId` is a user-defined key, not a DB UUID | — | `{draft}` | 404 |
+| DELETE | /drafts/:formType/:formId | Yes | Delete draft by (user, formType, formId) | — | `{message}` | 500 |

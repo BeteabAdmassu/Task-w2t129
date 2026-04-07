@@ -318,11 +318,19 @@ func (h *SystemHandler) Rollback(c echo.Context) error {
 }
 
 // SaveDraft saves a draft checkpoint.
+// The form_type is taken from the route parameter ":formType", not the body.
 func (h *SystemHandler) SaveDraft(c echo.Context) error {
 	userID := middleware.GetUserID(c)
+	formType := c.Param("formType")
+	if formType == "" {
+		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Validation failed",
+			Code:    http.StatusBadRequest,
+			Details: "Form type is required in the URL path",
+		})
+	}
 
 	var req struct {
-		FormType  string          `json:"form_type"`
 		FormID    *string         `json:"form_id"`
 		StateJSON json.RawMessage `json:"state_json"`
 	}
@@ -333,13 +341,6 @@ func (h *SystemHandler) SaveDraft(c echo.Context) error {
 		})
 	}
 
-	if req.FormType == "" {
-		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
-			Error:   "Validation failed",
-			Code:    http.StatusBadRequest,
-			Details: "Form type is required",
-		})
-	}
 	if req.StateJSON == nil {
 		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "Validation failed",
@@ -351,7 +352,7 @@ func (h *SystemHandler) SaveDraft(c echo.Context) error {
 	draft := &models.DraftCheckpoint{
 		ID:        uuid.New().String(),
 		UserID:    userID,
-		FormType:  req.FormType,
+		FormType:  formType,
 		FormID:    req.FormID,
 		StateJSON: req.StateJSON,
 		SavedAt:   time.Now(),
@@ -366,8 +367,9 @@ func (h *SystemHandler) SaveDraft(c echo.Context) error {
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"user_id":  userID,
-		"draft_id": draft.ID,
+		"user_id":   userID,
+		"form_type": formType,
+		"draft_id":  draft.ID,
 	}).Info("Draft saved")
 
 	return c.JSON(http.StatusCreated, draft)
@@ -391,74 +393,43 @@ func (h *SystemHandler) ListDrafts(c echo.Context) error {
 	})
 }
 
-// GetDraft returns a single draft by ID.
+// GetDraft returns a draft identified by (userID, formType, formId).
 func (h *SystemHandler) GetDraft(c echo.Context) error {
-	id := c.Param("formId")
-	if id == "" {
+	userID := middleware.GetUserID(c)
+	formType := c.Param("formType")
+	formID := c.Param("formId")
+	if formType == "" || formID == "" {
 		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
-			Error: "Draft ID is required",
+			Error: "formType and formId path parameters are required",
 			Code:  http.StatusBadRequest,
 		})
 	}
 
-	draft, err := h.repo.GetDraftByID(id)
+	draft, err := h.repo.GetDraft(userID, formType, formID)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, models.ErrorResponse{
 			Error:   "Draft not found",
 			Code:    http.StatusNotFound,
-			Details: "No draft found with the given ID",
+			Details: "No draft found for the given user, form type, and form ID",
 		})
-	}
-
-	// Ensure user can only access their own drafts
-	userID := middleware.GetUserID(c)
-	if draft.UserID != userID {
-		role := middleware.GetUserRole(c)
-		if role != "system_admin" {
-			return c.JSON(http.StatusForbidden, models.ErrorResponse{
-				Error:   "Access denied",
-				Code:    http.StatusForbidden,
-				Details: "You can only access your own drafts",
-			})
-		}
 	}
 
 	return c.JSON(http.StatusOK, draft)
 }
 
-// DeleteDraft deletes a draft by ID.
+// DeleteDraft deletes a draft identified by (userID, formType, formId).
 func (h *SystemHandler) DeleteDraft(c echo.Context) error {
-	id := c.Param("formId")
-	if id == "" {
+	userID := middleware.GetUserID(c)
+	formType := c.Param("formType")
+	formID := c.Param("formId")
+	if formType == "" || formID == "" {
 		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
-			Error: "Draft ID is required",
+			Error: "formType and formId path parameters are required",
 			Code:  http.StatusBadRequest,
 		})
 	}
 
-	draft, err := h.repo.GetDraftByID(id)
-	if err != nil {
-		return c.JSON(http.StatusNotFound, models.ErrorResponse{
-			Error:   "Draft not found",
-			Code:    http.StatusNotFound,
-			Details: "No draft found with the given ID",
-		})
-	}
-
-	// Ensure user can only delete their own drafts
-	userID := middleware.GetUserID(c)
-	if draft.UserID != userID {
-		role := middleware.GetUserRole(c)
-		if role != "system_admin" {
-			return c.JSON(http.StatusForbidden, models.ErrorResponse{
-				Error:   "Access denied",
-				Code:    http.StatusForbidden,
-				Details: "You can only delete your own drafts",
-			})
-		}
-	}
-
-	if err := h.repo.DeleteDraftByID(id); err != nil {
+	if err := h.repo.DeleteDraft(userID, formType, formID); err != nil {
 		logrus.WithError(err).Error("Failed to delete draft")
 		return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error: "Failed to delete draft",
@@ -467,8 +438,9 @@ func (h *SystemHandler) DeleteDraft(c echo.Context) error {
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"user_id":  userID,
-		"draft_id": id,
+		"user_id":   userID,
+		"form_type": formType,
+		"form_id":   formID,
 	}).Info("Draft deleted")
 
 	return c.JSON(http.StatusOK, map[string]string{

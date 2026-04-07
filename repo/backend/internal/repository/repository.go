@@ -856,7 +856,7 @@ func (r *Repository) GetTechnicianWithLeastOrders(trade string) (*models.User, e
 		 WHERE u.role = 'maintenance_tech' AND u.is_active = true
 		 ORDER BY (
 		   SELECT COUNT(*) FROM work_orders wo
-		   WHERE wo.assigned_to = u.id AND wo.status IN ('open', 'in_progress')
+		   WHERE wo.assigned_to = u.id AND wo.status IN ('submitted', 'dispatched', 'in_progress')
 		     AND wo.tenant_id = $1
 		 ) ASC
 		 LIMIT 1`, r.tenantID,

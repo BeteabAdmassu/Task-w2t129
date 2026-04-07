@@ -2,6 +2,8 @@ import React, { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { workOrdersAPI } from '../../services/api';
 import { useFetch } from '../../hooks/useFetch';
+import { useDraftAutoSave } from '../../hooks/useDraftAutoSave';
+import { DraftRecoveryDialog } from '../common/DraftRecoveryDialog';
 import type { WorkOrder, PaginatedResponse } from '../../types';
 import LoadingSpinner from '../common/LoadingSpinner';
 import ErrorMessage from '../common/ErrorMessage';
@@ -56,6 +58,9 @@ const WorkOrdersPage: React.FC = () => {
   const [createSubmitting, setCreateSubmitting] = useState(false);
   const [createSuccess, setCreateSuccess] = useState('');
 
+  // Draft auto-save: saves create form state every 30s
+  const { clearDraft } = useDraftAutoSave('work_order', 'default', createForm);
+
   // Context menu
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; order: WorkOrder } | null>(null);
 
@@ -74,6 +79,7 @@ const WorkOrdersPage: React.FC = () => {
       setCreateSuccess('Work order created successfully');
       setShowCreate(false);
       setCreateForm({ trade: 'general', priority: 'normal', description: '', location: '' });
+      clearDraft();
       refetch();
       setTimeout(() => setCreateSuccess(''), 3000);
     } catch (e: any) {
@@ -133,8 +139,28 @@ const WorkOrdersPage: React.FC = () => {
     { key: 'assigned_to', header: 'Assigned To', render: (wo: WorkOrder) => wo.assigned_to || <span style={{ color: '#999' }}>Unassigned</span> },
   ];
 
+  const handleDraftRestore = (state: unknown) => {
+    const s = state as typeof createForm;
+    if (s && typeof s === 'object') {
+      setCreateForm({
+        trade: (s as any).trade || 'general',
+        priority: (s as any).priority || 'normal',
+        description: (s as any).description || '',
+        location: (s as any).location || '',
+      });
+      setShowCreate(true);
+    }
+  };
+
   return (
     <div style={{ padding: '1.5rem' }}>
+      <DraftRecoveryDialog
+        formType="work_order"
+        formId="default"
+        onRestore={handleDraftRestore}
+        onDiscard={clearDraft}
+      />
+
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
         <h2 style={{ margin: 0 }}>Work Orders</h2>
         <button onClick={() => setShowCreate(true)} style={btnPrimary}>+ New Work Order</button>

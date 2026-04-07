@@ -122,6 +122,9 @@ export const workOrdersAPI = {
   rate: (id: string, rating: number) =>
     api.post(`/work-orders/${id}/rate`, { rating }),
   analytics: () => api.get('/work-orders/analytics'),
+  linkPhoto: (id: string, fileId: string) =>
+    api.post(`/work-orders/${id}/photos`, { file_id: fileId }),
+  getPhotos: (id: string) => api.get(`/work-orders/${id}/photos`),
 };
 
 // Members
@@ -156,11 +159,12 @@ export const chargesAPI = {
   getStatement: (id: string) => api.get(`/statements/${id}`),
   generateStatement: (data: { period_start: string; period_end: string }) =>
     api.post('/statements/generate', data),
-  reconcile: (id: string, data: { variance_notes: string }) =>
+  // expected_total is required so the backend can compute ABS(total-expected)>25 variance check.
+  reconcile: (id: string, data: { expected_total: number; variance_notes?: string }) =>
     api.post(`/statements/${id}/reconcile`, data),
   approve: (id: string) => api.post(`/statements/${id}/approve`),
-  exportStatement: (id: string) =>
-    api.post(`/statements/${id}/export`, {}, { responseType: 'blob' }),
+  exportStatement: (id: string, format: 'csv' | 'json' = 'csv') =>
+    api.post(`/statements/${id}/export`, {}, { params: { format }, responseType: 'blob' }),
 };
 
 // Files

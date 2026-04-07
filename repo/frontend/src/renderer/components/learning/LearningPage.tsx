@@ -72,8 +72,12 @@ const LearningPage: React.FC = () => {
   const [searchTotal, setSearchTotal] = useState(0);
   const [searchPage, setSearchPage] = useState(1);
 
-  // Import
+  // Import modal state
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importForm, setImportForm] = useState({ category: '', title: '', chapter_id: '' });
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importFormErr, setImportFormErr] = useState('');
   const [importLoading, setImportLoading] = useState(false);
   const [importMsg, setImportMsg] = useState('');
 
@@ -211,21 +215,39 @@ const LearningPage: React.FC = () => {
     }
   };
 
-  // Import
-  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // Import modal handlers
+  const openImportModal = () => {
+    setImportForm({ category: '', title: '', chapter_id: selectedChapter?.id || '' });
+    setImportFile(null);
+    setImportFormErr('');
+    setShowImportModal(true);
+  };
+
+  const handleImportFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] || null;
+    setImportFile(file);
+  };
+
+  const handleImportSubmit = async () => {
+    if (!importForm.category.trim()) { setImportFormErr('Category is required'); return; }
+    if (!importForm.title.trim()) { setImportFormErr('Title is required'); return; }
+    if (!importForm.chapter_id.trim()) { setImportFormErr('Chapter ID is required — select a chapter first or paste its ID'); return; }
+    if (!importFile) { setImportFormErr('A file is required'); return; }
     setImportLoading(true);
-    setImportMsg('');
+    setImportFormErr('');
     const fd = new FormData();
-    fd.append('file', file);
+    fd.append('category', importForm.category.trim());
+    fd.append('title', importForm.title.trim());
+    fd.append('chapter_id', importForm.chapter_id.trim());
+    fd.append('file', importFile);
     try {
       await learningAPI.importContent(fd);
       setImportMsg('Import successful');
+      setShowImportModal(false);
       refetchSubjects();
       setTimeout(() => setImportMsg(''), 3000);
     } catch (err: any) {
-      setImportMsg('Import failed: ' + (err.response?.data?.error || err.message));
+      setImportFormErr('Import failed: ' + (err.response?.data?.error || err.message));
     } finally {
       setImportLoading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -266,8 +288,8 @@ const LearningPage: React.FC = () => {
           {searchLoading ? 'Searching...' : 'Search'}
         </button>
         <button onClick={() => { setSearchQuery(''); setSearchResults(null); }} style={btnSecondary}>Clear</button>
-        <input ref={fileInputRef} type="file" accept=".md,.html,.htm" style={{ display: 'none' }} onChange={handleImport} />
-        <button onClick={() => fileInputRef.current?.click()} style={btnSecondary} disabled={importLoading}>
+        <input ref={fileInputRef} type="file" accept=".md,.html,.htm" style={{ display: 'none' }} onChange={handleImportFileChange} />
+        <button onClick={openImportModal} style={btnSecondary} disabled={importLoading}>
           {importLoading ? 'Importing...' : 'Import'}
         </button>
       </div>
@@ -388,6 +410,44 @@ const LearningPage: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Import Modal */}
+      {showImportModal && (
+        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 999 }} onClick={() => setShowImportModal(false)}>
+          <div style={{ backgroundColor: '#fff', borderRadius: 8, width: 480, maxWidth: '90vw', boxShadow: '0 4px 24px rgba(0,0,0,0.2)', padding: '1.5rem' }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+              <h3 style={{ margin: 0 }}>Import Content</h3>
+              <button onClick={() => setShowImportModal(false)} style={{ background: 'none', border: 'none', fontSize: '1.5rem', cursor: 'pointer', color: '#666' }}>&times;</button>
+            </div>
+            {importFormErr && <div style={{ color: '#dc3545', marginBottom: '0.75rem', fontSize: '0.85rem' }}>{importFormErr}</div>}
+            <div style={{ marginBottom: '0.75rem' }}>
+              <label style={{ display: 'block', marginBottom: '0.25rem', fontWeight: 500 }}>Category *</label>
+              <input value={importForm.category} onChange={e => setImportForm({ ...importForm, category: e.target.value })} placeholder="e.g. Pharmacology" style={inputStyle} />
+            </div>
+            <div style={{ marginBottom: '0.75rem' }}>
+              <label style={{ display: 'block', marginBottom: '0.25rem', fontWeight: 500 }}>Title *</label>
+              <input value={importForm.title} onChange={e => setImportForm({ ...importForm, title: e.target.value })} placeholder="Document title" style={inputStyle} />
+            </div>
+            <div style={{ marginBottom: '0.75rem' }}>
+              <label style={{ display: 'block', marginBottom: '0.25rem', fontWeight: 500 }}>Chapter ID *</label>
+              <input value={importForm.chapter_id} onChange={e => setImportForm({ ...importForm, chapter_id: e.target.value })} placeholder={selectedChapter?.id || 'Select a chapter first, or paste ID here'} style={inputStyle} />
+            </div>
+            <div style={{ marginBottom: '1rem' }}>
+              <label style={{ display: 'block', marginBottom: '0.25rem', fontWeight: 500 }}>File * (.md, .html)</label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <button onClick={() => fileInputRef.current?.click()} style={btnSecondary} type="button">Choose File</button>
+                <span style={{ fontSize: '0.85rem', color: '#555' }}>{importFile ? importFile.name : 'No file chosen'}</span>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
+              <button onClick={() => setShowImportModal(false)} style={btnSecondary}>Cancel</button>
+              <button onClick={handleImportSubmit} disabled={importLoading} style={importLoading ? btnDisabled : btnPrimary}>
+                {importLoading ? 'Importing...' : 'Import'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* KP Form Modal */}
       {showKpForm && (

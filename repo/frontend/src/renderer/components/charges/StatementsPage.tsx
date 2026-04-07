@@ -6,7 +6,6 @@ import ErrorMessage from '../common/ErrorMessage';
 import EmptyState from '../common/EmptyState';
 import DataTable from '../common/DataTable';
 import Modal from '../common/Modal';
-import { useAuth } from '../../hooks/useAuth';
 
 const inputStyle: React.CSSProperties = {
   width: '100%', padding: '0.5rem', border: '1px solid #ccc', borderRadius: 4, fontSize: '0.9rem', boxSizing: 'border-box',
@@ -18,9 +17,6 @@ const btnDisabled: React.CSSProperties = { ...btnPrimary, opacity: 0.6, cursor: 
 const btnSecondary: React.CSSProperties = {
   padding: '0.5rem 1rem', backgroundColor: '#6c757d', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: '0.9rem',
 };
-const btnSuccess: React.CSSProperties = {
-  padding: '0.5rem 1rem', backgroundColor: '#28a745', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: '0.9rem',
-};
 const btnWarning: React.CSSProperties = {
   padding: '0.5rem 1rem', backgroundColor: '#ffc107', color: '#333', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: '0.9rem',
 };
@@ -28,17 +24,14 @@ const successStyle: React.CSSProperties = {
   padding: '0.5rem 1rem', backgroundColor: '#d4edda', border: '1px solid #c3e6cb', borderRadius: 4, color: '#155724', marginBottom: '1rem',
 };
 
+/** Canonical statement lifecycle: pending → approved → paid */
 const statusColors: Record<string, { bg: string; color: string }> = {
-  draft: { bg: '#e0e0e0', color: '#555' },
-  generated: { bg: '#cce5ff', color: '#004085' },
-  reconciled: { bg: '#fff3cd', color: '#856404' },
+  pending:  { bg: '#cce5ff', color: '#004085' },
   approved: { bg: '#d4edda', color: '#155724' },
-  exported: { bg: '#d1ecf1', color: '#0c5460' },
+  paid:     { bg: '#d1ecf1', color: '#0c5460' },
 };
 
 const StatementsPage: React.FC = () => {
-  const { user } = useAuth();
-
   // List state
   const [statements, setStatements] = useState<ChargeStatement[]>([]);
   const [loading, setLoading] = useState(true);
@@ -75,12 +68,13 @@ const StatementsPage: React.FC = () => {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState('');
 
-  // Reconcile
+  // Reconcile form state
   const [showReconcile, setShowReconcile] = useState(false);
+  const [reconcileExpected, setReconcileExpected] = useState('');
   const [reconcileNotes, setReconcileNotes] = useState('');
   const [reconcileErr, setReconcileErr] = useState('');
 
-  // Action loading (reconcile, approve, export)
+  // Action loading
   const [actionLoading, setActionLoading] = useState(false);
 
   const showSuccess = (msg: string) => {
@@ -131,25 +125,33 @@ const StatementsPage: React.FC = () => {
     }
   };
 
-  // Reconcile
+  // Reconcile (pending → approved)
   const handleReconcile = async () => {
     if (!selectedStatement) return;
-    if (selectedStatement.total_amount > 25 && reconcileNotes.trim().length === 0) {
-      setReconcileErr('Variance notes are required when total exceeds $25');
+    const expectedNum = parseFloat(reconcileExpected);
+    if (!reconcileExpected || isNaN(expectedNum) || expectedNum < 0) {
+      setReconcileErr('A valid expected total is required');
       return;
     }
-    if (reconcileNotes.trim().length === 0) {
-      setReconcileErr('Variance notes are required');
+    const variance = Math.abs(selectedStatement.total_amount - expectedNum);
+    if (variance > 25 && reconcileNotes.trim().length === 0) {
+      setReconcileErr('Variance notes are required when variance exceeds $25');
       return;
     }
     setActionLoading(true);
     setReconcileErr('');
     try {
-      await chargesAPI.reconcile(selectedStatement.id, { variance_notes: reconcileNotes.trim() });
-      showSuccess('Statement reconciled');
+      await chargesAPI.reconcile(selectedStatement.id, {
+        expected_total: expectedNum,
+        variance_notes: reconcileNotes.trim() || undefined,
+      });
+      showSuccess('Statement reconciled and approved');
       setShowReconcile(false);
+      setReconcileExpected('');
       setReconcileNotes('');
-      viewDetail(selectedStatement);
+      const r = await chargesAPI.getStatement(selectedStatement.id);
+      const d = r.data;
+      setSelectedStatement(d.statement || d);
       fetchStatements();
     } catch (e: any) {
       setReconcileErr(e.response?.data?.error || 'Reconciliation failed');
@@ -158,50 +160,23 @@ const StatementsPage: React.FC = () => {
     }
   };
 
-  // Determine approval step label and whether current user already approved
-  const getApproveInfo = (stmt: ChargeStatement) => {
-    const userId = user?.id || '';
-    const alreadyApproved = stmt.approved_by_1 === userId || stmt.approved_by_2 === userId;
-    let stepLabel = 'Approve - Step 1';
-    if (stmt.approved_by_1 && !stmt.approved_by_2) {
-      stepLabel = 'Approve - Step 2';
-    }
-    return { alreadyApproved, stepLabel };
-  };
-
-  // Approve
-  const handleApprove = async () => {
-    if (!selectedStatement) return;
-    setActionLoading(true);
-    try {
-      await chargesAPI.approve(selectedStatement.id);
-      showSuccess('Statement approved');
-      // Refresh detail and list
-      const r = await chargesAPI.getStatement(selectedStatement.id);
-      const d = r.data;
-      setSelectedStatement(d.statement || d);
-      setLineItems(d.line_items || d.lineItems || d.items || []);
-      fetchStatements();
-    } catch (e: any) {
-      setError(e.response?.data?.error || 'Approval failed');
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  // Export CSV
+  // Export CSV (approved → paid)
   const handleExport = async () => {
     if (!selectedStatement) return;
     setActionLoading(true);
     try {
-      const r = await chargesAPI.exportStatement(selectedStatement.id);
+      const r = await chargesAPI.exportStatement(selectedStatement.id, 'csv');
       const url = window.URL.createObjectURL(new Blob([r.data]));
       const a = document.createElement('a');
       a.href = url;
       a.download = `statement-${selectedStatement.id.slice(0, 8)}.csv`;
       a.click();
       window.URL.revokeObjectURL(url);
-      showSuccess('Statement exported as CSV');
+      showSuccess('Statement exported — status updated to paid');
+      const r2 = await chargesAPI.getStatement(selectedStatement.id);
+      const d = r2.data;
+      setSelectedStatement(d.statement || d);
+      fetchStatements();
     } catch (e: any) {
       setError(e.response?.data?.error || 'Export failed');
     } finally {
@@ -268,7 +243,7 @@ const StatementsPage: React.FC = () => {
             <>
               {/* Statement Info */}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1.5rem' }}>
-                <div><span style={{ fontWeight: 500, color: '#666' }}>Period:</span> {new Date(selectedStatement.period_start).toLocaleDateString()} - {new Date(selectedStatement.period_end).toLocaleDateString()}</div>
+                <div><span style={{ fontWeight: 500, color: '#666' }}>Period:</span> {new Date(selectedStatement.period_start).toLocaleDateString()} – {new Date(selectedStatement.period_end).toLocaleDateString()}</div>
                 <div><span style={{ fontWeight: 500, color: '#666' }}>Status:</span>{' '}
                   {(() => {
                     const sc = statusColors[selectedStatement.status] || { bg: '#eee', color: '#333' };
@@ -276,11 +251,13 @@ const StatementsPage: React.FC = () => {
                   })()}
                 </div>
                 <div><span style={{ fontWeight: 500, color: '#666' }}>Total Amount:</span> <strong>${selectedStatement.total_amount.toFixed(2)}</strong></div>
+                {selectedStatement.expected_total > 0 && (
+                  <div><span style={{ fontWeight: 500, color: '#666' }}>Expected Total:</span> ${selectedStatement.expected_total.toFixed(2)}</div>
+                )}
                 <div><span style={{ fontWeight: 500, color: '#666' }}>Created:</span> {new Date(selectedStatement.created_at).toLocaleString()}</div>
-                {selectedStatement.approved_by_1 && <div><span style={{ fontWeight: 500, color: '#666' }}>Approved By (Step 1):</span> {selectedStatement.approved_by_1}</div>}
-                {selectedStatement.approved_by_2 && <div><span style={{ fontWeight: 500, color: '#666' }}>Approved By (Step 2):</span> {selectedStatement.approved_by_2}</div>}
+                {selectedStatement.approved_by && <div><span style={{ fontWeight: 500, color: '#666' }}>Approved By:</span> {selectedStatement.approved_by}</div>}
                 {selectedStatement.variance_notes && <div style={{ gridColumn: '1 / -1' }}><span style={{ fontWeight: 500, color: '#666' }}>Variance Notes:</span> {selectedStatement.variance_notes}</div>}
-                {selectedStatement.exported_at && <div><span style={{ fontWeight: 500, color: '#666' }}>Exported:</span> {new Date(selectedStatement.exported_at).toLocaleString()}</div>}
+                {selectedStatement.paid_at && <div><span style={{ fontWeight: 500, color: '#666' }}>Paid At:</span> {new Date(selectedStatement.paid_at).toLocaleString()}</div>}
               </div>
 
               {/* Line Items */}
@@ -293,22 +270,14 @@ const StatementsPage: React.FC = () => {
 
               {/* Actions */}
               <div style={{ display: 'flex', gap: '0.5rem', marginTop: '1.5rem', flexWrap: 'wrap', borderTop: '1px solid #eee', paddingTop: '1rem' }}>
-                {/* Reconcile */}
-                {(selectedStatement.status === 'generated' || selectedStatement.status === 'draft') && (
-                  <button onClick={() => setShowReconcile(true)} style={btnWarning} disabled={actionLoading}>Reconcile</button>
+                {/* Reconcile: only available from pending */}
+                {selectedStatement.status === 'pending' && (
+                  <button onClick={() => setShowReconcile(true)} style={btnWarning} disabled={actionLoading}>
+                    Reconcile &amp; Approve
+                  </button>
                 )}
-                {/* Approve */}
-                {selectedStatement.status === 'reconciled' && (() => {
-                  const { alreadyApproved, stepLabel } = getApproveInfo(selectedStatement);
-                  return (
-                    <button onClick={handleApprove} style={alreadyApproved ? btnDisabled : btnSuccess} disabled={actionLoading || alreadyApproved}
-                      title={alreadyApproved ? 'You have already approved this statement' : ''}>
-                      {actionLoading ? 'Processing...' : stepLabel}
-                    </button>
-                  );
-                })()}
-                {/* Export CSV */}
-                {(selectedStatement.status === 'approved' || selectedStatement.status === 'reconciled' || selectedStatement.status === 'exported') && (
+                {/* Export CSV: only available from approved */}
+                {selectedStatement.status === 'approved' && (
                   <button onClick={handleExport} style={btnPrimary} disabled={actionLoading}>
                     {actionLoading ? 'Exporting...' : 'Export CSV'}
                   </button>
@@ -316,21 +285,40 @@ const StatementsPage: React.FC = () => {
               </div>
 
               {/* Reconcile Form */}
-              {showReconcile && (
+              {showReconcile && selectedStatement.status === 'pending' && (
                 <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: '#fff', borderRadius: 4, border: '1px solid #e0e0e0' }}>
                   <h4 style={{ margin: '0 0 0.5rem' }}>Reconcile Statement</h4>
                   {reconcileErr && <div style={{ color: '#dc3545', marginBottom: '0.5rem', fontSize: '0.85rem' }}>{reconcileErr}</div>}
                   <p style={{ fontSize: '0.85rem', color: '#666', margin: '0 0 0.75rem' }}>
-                    {selectedStatement.total_amount > 25 ? 'Total exceeds $25 -- variance notes are required.' : 'Provide reconciliation notes.'}
+                    System total: <strong>${selectedStatement.total_amount.toFixed(2)}</strong>. Enter the expected total to compute variance. Notes are required if variance exceeds $25.
                   </p>
-                  <textarea value={reconcileNotes} onChange={e => setReconcileNotes(e.target.value)}
-                    rows={3} style={{ ...inputStyle, resize: 'vertical', marginBottom: '0.75rem' }}
-                    placeholder="Enter variance notes..." />
+                  <div style={{ marginBottom: '0.75rem' }}>
+                    <label style={{ display: 'block', marginBottom: '0.25rem', fontWeight: 500 }}>Expected Total *</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={reconcileExpected}
+                      onChange={e => setReconcileExpected(e.target.value)}
+                      style={inputStyle}
+                      placeholder="0.00"
+                    />
+                  </div>
+                  <div style={{ marginBottom: '0.75rem' }}>
+                    <label style={{ display: 'block', marginBottom: '0.25rem', fontWeight: 500 }}>Variance Notes {reconcileExpected && Math.abs(selectedStatement.total_amount - parseFloat(reconcileExpected || '0')) > 25 ? '*' : ''}</label>
+                    <textarea
+                      value={reconcileNotes}
+                      onChange={e => setReconcileNotes(e.target.value)}
+                      rows={3}
+                      style={{ ...inputStyle, resize: 'vertical' }}
+                      placeholder="Enter variance notes..."
+                    />
+                  </div>
                   <div style={{ display: 'flex', gap: '0.5rem' }}>
                     <button onClick={handleReconcile} disabled={actionLoading} style={actionLoading ? btnDisabled : btnWarning}>
-                      {actionLoading ? 'Reconciling...' : 'Confirm Reconcile'}
+                      {actionLoading ? 'Processing...' : 'Confirm Reconcile'}
                     </button>
-                    <button onClick={() => { setShowReconcile(false); setReconcileErr(''); setReconcileNotes(''); }} style={btnSecondary}>Cancel</button>
+                    <button onClick={() => { setShowReconcile(false); setReconcileErr(''); setReconcileExpected(''); setReconcileNotes(''); }} style={btnSecondary}>Cancel</button>
                   </div>
                 </div>
               )}

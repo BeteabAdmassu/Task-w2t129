@@ -509,7 +509,7 @@ func (h *LearningHandler) SearchKnowledgePoints(c echo.Context) error {
 }
 
 // ImportContent accepts a multipart file upload and creates a knowledge point.
-// Required fields: file, category, title.
+// Required fields: file, category, title, chapter_id.
 func (h *LearningHandler) ImportContent(c echo.Context) error {
 	chapterID := c.FormValue("chapter_id")
 	category := c.FormValue("category")

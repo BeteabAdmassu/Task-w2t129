@@ -172,16 +172,19 @@ export interface RateTable {
   effective_date: string;
 }
 
+/** Canonical statement lifecycle: pending → approved → paid */
+export type StatementStatus = 'pending' | 'approved' | 'paid';
+
 export interface ChargeStatement {
   id: string;
   period_start: string;
   period_end: string;
   total_amount: number;
-  status: string;
-  approved_by_1?: string;
-  approved_by_2?: string;
+  expected_total: number;
+  status: StatementStatus;
+  approved_by?: string;
   variance_notes?: string;
-  exported_at?: string;
+  paid_at?: string;
   created_at: string;
 }
 

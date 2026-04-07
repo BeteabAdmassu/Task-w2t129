@@ -61,7 +61,7 @@ Deliver an offline-first desktop workspace for community clinics and pharmacy-ad
 39. Offline rate tables (distance in miles — manual or USB CSV import, weight/volume tiering, fuel surcharge %, taxable flags)
 40. Generate statements by date range
 41. Reconcile variances with mandatory notes for deltas over $25.00
-42. Two-step approval routing for settlements
+42. Single-step approval: reconcile (`pending`→`approved`) carries `expected_total` and optional `variance_notes` (required when ABS(total−expected)>$25); export transitions `approved`→`paid`
 43. Export signed CSV/JSON files for downstream systems
 
 ### File Operations
@@ -324,11 +324,11 @@ Deliver an offline-first desktop workspace for community clinics and pharmacy-ad
 | period_start | DATE | |
 | period_end | DATE | |
 | total_amount | DECIMAL(12,2) | |
-| status | VARCHAR(20) | draft, pending_approval, approved, exported |
-| approved_by_1 | UUID FK → auth_users | nullable |
-| approved_by_2 | UUID FK → auth_users | nullable |
-| variance_notes | TEXT | required if delta > $25 |
-| exported_at | TIMESTAMPTZ | nullable |
+| status | VARCHAR(20) | pending, approved, paid — lifecycle: pending→approved→paid |
+| expected_total | DECIMAL(12,2) | set during reconcile; variance = ABS(total_amount - expected_total) |
+| approved_by | UUID FK → auth_users | nullable, set on reconcile/approve |
+| variance_notes | TEXT | required if ABS(total_amount - expected_total) > $25 |
+| paid_at | TIMESTAMPTZ | nullable, set when exported |
 | created_at | TIMESTAMPTZ | |
 
 ### charge_line_items
@@ -441,7 +441,7 @@ All endpoints served locally at `http://localhost:<port>/api/v1`. Auth via sessi
 | POST | /api/v1/learning/knowledge-points | Learning | Create knowledge point |
 | PUT | /api/v1/learning/knowledge-points/:id | Learning | Update knowledge point |
 | GET | /api/v1/learning/search | Any | Full-text search across all content |
-| POST | /api/v1/learning/import | Learning | Import Markdown/HTML/file |
+| POST | /api/v1/learning/import | Learning | Import Markdown/HTML/file — multipart fields: `file`, `category`, `title`, `chapter_id` all required |
 | GET | /api/v1/learning/export/:id | Learning | Export knowledge point |
 
 ### Work Orders
@@ -480,9 +480,9 @@ All endpoints served locally at `http://localhost:<port>/api/v1`. Auth via sessi
 | GET | /api/v1/statements | Admin | List statements |
 | POST | /api/v1/statements/generate | Admin | Generate statement by date range |
 | GET | /api/v1/statements/:id | Admin | Get statement with line items |
-| POST | /api/v1/statements/:id/reconcile | Admin | Reconcile with notes (required if delta > $25) |
-| POST | /api/v1/statements/:id/approve | Admin | Approve (step 1 or step 2) |
-| POST | /api/v1/statements/:id/export | Admin | Export signed CSV/JSON |
+| POST | /api/v1/statements/:id/reconcile | Admin | Reconcile (`pending`→`approved`): body `{expected_total, variance_notes?}`; notes required when ABS(total−expected)>$25 |
+| POST | /api/v1/statements/:id/approve | Admin | Approve alias (same `pending`→`approved` transition as reconcile) |
+| POST | /api/v1/statements/:id/export | Admin | Export & mark paid (`approved`→`paid`); query `?format=csv\|json` |
 
 ### Files
 | Method | Path | Auth | Description |
