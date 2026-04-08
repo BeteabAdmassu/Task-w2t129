@@ -72,6 +72,9 @@ const LearningPage: React.FC = () => {
   const [searchTotal, setSearchTotal] = useState(0);
   const [searchPage, setSearchPage] = useState(1);
 
+  // Export format selection per knowledge point (kp.id → 'md' | 'html')
+  const [exportFormats, setExportFormats] = useState<Record<string, 'md' | 'html'>>({});
+
   // Import modal state
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showImportModal, setShowImportModal] = useState(false);
@@ -254,14 +257,17 @@ const LearningPage: React.FC = () => {
     }
   };
 
-  // Export
-  const handleExport = async (kpId: string) => {
+  // Export — honours per-KP format selection (default md)
+  const handleExport = async (kpId: string, title?: string) => {
+    const fmt = exportFormats[kpId] ?? 'md';
     try {
-      const r = await learningAPI.exportContent(kpId);
-      const url = window.URL.createObjectURL(new Blob([r.data]));
+      const r = await learningAPI.exportContent(kpId, fmt);
+      const mimeType = fmt === 'html' ? 'text/html' : 'text/markdown';
+      const url = window.URL.createObjectURL(new Blob([r.data], { type: mimeType }));
       const a = document.createElement('a');
       a.href = url;
-      a.download = `knowledge-point-${kpId}.md`;
+      const safeName = (title || `knowledge-point-${kpId}`).replace(/[/\\?%*:|"<>]/g, '-');
+      a.download = `${safeName}.${fmt}`;
       a.click();
       window.URL.revokeObjectURL(url);
     } catch (err: any) {
@@ -391,7 +397,16 @@ const LearningPage: React.FC = () => {
                 <h4 style={{ margin: 0 }}>{kp.title}</h4>
                 <div style={{ display: 'flex', gap: '0.25rem' }}>
                   <button onClick={() => openKpForm(kp)} style={{ ...btnSecondary, padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}>Edit</button>
-                  <button onClick={() => handleExport(kp.id)} style={{ ...btnSecondary, padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}>Export</button>
+                  <select
+                    value={exportFormats[kp.id] ?? 'md'}
+                    onChange={e => setExportFormats(prev => ({ ...prev, [kp.id]: e.target.value as 'md' | 'html' }))}
+                    style={{ fontSize: '0.75rem', padding: '0.15rem 0.25rem', border: '1px solid #ccc', borderRadius: 3 }}
+                    title="Export format"
+                  >
+                    <option value="md">MD</option>
+                    <option value="html">HTML</option>
+                  </select>
+                  <button onClick={() => handleExport(kp.id, kp.title)} style={{ ...btnSecondary, padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}>Export</button>
                 </div>
               </div>
               <p style={{ margin: '0.5rem 0', color: '#555', fontSize: '0.9rem', whiteSpace: 'pre-wrap', maxHeight: 100, overflow: 'hidden' }}>{kp.content}</p>

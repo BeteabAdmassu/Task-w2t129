@@ -1,7 +1,8 @@
 import React, { useState, FormEvent, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { skusAPI } from '../../services/api';
+import { skusAPI, inventoryAPI } from '../../services/api';
 import { useFetch } from '../../hooks/useFetch';
+import { useAuth } from '../../hooks/useAuth';
 import type { SKU, PaginatedResponse } from '../../types';
 import LoadingSpinner from '../common/LoadingSpinner';
 import ErrorMessage from '../common/ErrorMessage';
@@ -13,6 +14,8 @@ import ContextMenu from '../common/ContextMenu';
 
 const SKUListPage: React.FC = () => {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const canAdjust = user?.role === 'system_admin' || user?.role === 'inventory_pharmacist';
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const pageSize = 20;
@@ -103,6 +106,23 @@ const SKUListPage: React.FC = () => {
       setTimeout(() => setOpSuccess(null), 3000);
     } catch (err: any) {
       setOpError(err.response?.data?.error || 'Operation failed');
+    }
+  };
+
+  const handleQuickAdjust = async (sku: SKU) => {
+    const input = window.prompt(`Adjust quantity for "${sku.name}"\nEnter signed quantity (e.g. +10 to add, -5 to remove):`);
+    if (input === null) return;
+    const qty = parseInt(input, 10);
+    if (isNaN(qty) || qty === 0) { setOpError('Enter a non-zero integer quantity'); return; }
+    setOpError(null);
+    setOpSuccess(null);
+    try {
+      await inventoryAPI.adjust({ sku_id: sku.id, quantity: qty, reason_code: 'manual_adjustment' });
+      setOpSuccess(`Adjusted "${sku.name}" by ${qty > 0 ? '+' : ''}${qty}`);
+      refetch();
+      setTimeout(() => setOpSuccess(null), 3000);
+    } catch (err: any) {
+      setOpError(err.response?.data?.error || 'Adjustment failed');
     }
   };
 
@@ -212,9 +232,21 @@ const SKUListPage: React.FC = () => {
           y={ctxMenu.y}
           onClose={() => setCtxMenu(null)}
           items={[
-            { label: 'Edit SKU', onClick: () => navigate(`/skus/${ctxMenu.sku.id}`) },
-            { label: 'View Batches', onClick: () => navigate(`/skus/${ctxMenu.sku.id}`) },
-            { label: ctxMenu.sku.is_active ? 'Deactivate' : 'Activate', onClick: () => handleDeactivate(ctxMenu.sku) },
+            { label: 'View / Edit SKU', onClick: () => navigate(`/skus/${ctxMenu.sku.id}`) },
+            {
+              label: 'Quick Adjust Inventory',
+              onClick: () => handleQuickAdjust(ctxMenu.sku),
+              disabled: !canAdjust || !ctxMenu.sku.is_active,
+            },
+            {
+              label: ctxMenu.sku.is_active ? 'Deactivate SKU' : 'Activate SKU',
+              onClick: () => handleDeactivate(ctxMenu.sku),
+              disabled: !canAdjust,
+            },
+            {
+              label: 'Export / Print',
+              onClick: () => { navigate(`/skus/${ctxMenu.sku.id}`); },
+            },
           ]}
         />
       )}

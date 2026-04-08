@@ -1,6 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { workOrdersAPI } from '../../services/api';
+import { workOrdersAPI, filesAPI } from '../../services/api';
+import { useAuth } from '../../hooks/useAuth';
 import { useFetch } from '../../hooks/useFetch';
 import { useDraftAutoSave } from '../../hooks/useDraftAutoSave';
 import { DraftRecoveryDialog } from '../common/DraftRecoveryDialog';
@@ -35,6 +36,8 @@ const tradeOptions = ['electrical', 'plumbing', 'hvac', 'general'];
 
 const WorkOrdersPage: React.FC = () => {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const isMaintenance = user?.role === 'maintenance_tech' || user?.role === 'system_admin';
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState('');
   const [priorityFilter, setPriorityFilter] = useState('');
@@ -57,6 +60,7 @@ const WorkOrdersPage: React.FC = () => {
   const [createErr, setCreateErr] = useState('');
   const [createSubmitting, setCreateSubmitting] = useState(false);
   const [createSuccess, setCreateSuccess] = useState('');
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
 
   // Draft auto-save: saves create form state every 30s
   const { clearDraft } = useDraftAutoSave('work_order', 'default', createForm);
@@ -70,16 +74,27 @@ const WorkOrdersPage: React.FC = () => {
     setCreateSubmitting(true);
     setCreateErr('');
     try {
+      // Upload any attached photos first, collect their IDs.
+      const photoIds: string[] = [];
+      for (const file of selectedFiles) {
+        const fd = new FormData();
+        fd.append('file', file);
+        const res = await filesAPI.upload(fd);
+        const fileObj = (res.data as any).file ?? res.data;
+        if (fileObj?.id) photoIds.push(fileObj.id);
+      }
+
       await workOrdersAPI.create({
         trade: createForm.trade,
         priority: createForm.priority,
         description: createForm.description.trim(),
         location: createForm.location.trim(),
-        photo_ids: [],
+        photo_ids: photoIds,
       });
       setCreateSuccess('Work order created successfully');
       setShowCreate(false);
       setCreateForm({ trade: 'general', priority: 'normal', description: '', location: '' });
+      setSelectedFiles([]);
       clearDraft();
       refetch();
       setTimeout(() => setCreateSuccess(''), 3000);
@@ -109,6 +124,16 @@ const WorkOrdersPage: React.FC = () => {
       refetch();
     } catch (e: any) {
       alert('Failed to close order: ' + (e.response?.data?.error || e.message));
+    }
+  };
+
+  const handleCancel = async (order: WorkOrder) => {
+    if (!window.confirm(`Cancel work order ${order.id.slice(0, 8)}? This cannot be undone.`)) return;
+    try {
+      await workOrdersAPI.update(order.id, { status: 'cancelled' });
+      refetch();
+    } catch (e: any) {
+      alert('Failed to cancel: ' + (e.response?.data?.error || e.message));
     }
   };
 
@@ -208,19 +233,36 @@ const WorkOrdersPage: React.FC = () => {
       {ctxMenu && (
         <ContextMenu x={ctxMenu.x} y={ctxMenu.y} onClose={() => setCtxMenu(null)} items={[
           { label: 'View Details', onClick: () => navigate(`/work-orders/${ctxMenu.order.id}`) },
-          { label: 'Update Status', onClick: () => {
-            const nextStatus: Record<string, string> = { submitted: 'dispatched', dispatched: 'in_progress', in_progress: 'completed' };
-            const next = nextStatus[ctxMenu.order.status];
-            if (next) handleStatusUpdate(ctxMenu.order, next);
-            else alert('Cannot advance status from ' + ctxMenu.order.status);
-          }, disabled: ctxMenu.order.status === 'completed' || ctxMenu.order.status === 'closed' },
-          { label: 'Close Order', onClick: () => handleClose(ctxMenu.order), disabled: ctxMenu.order.status !== 'completed' },
+          {
+            label: 'Update Status',
+            onClick: () => {
+              const nextStatus: Record<string, string> = { submitted: 'dispatched', dispatched: 'in_progress', in_progress: 'completed' };
+              const next = nextStatus[ctxMenu.order.status];
+              if (next) handleStatusUpdate(ctxMenu.order, next);
+              else alert('Cannot advance status from ' + ctxMenu.order.status);
+            },
+            disabled: !isMaintenance || ctxMenu.order.status === 'completed' || ctxMenu.order.status === 'closed' || ctxMenu.order.status === 'cancelled',
+          },
+          {
+            label: 'Close Order',
+            onClick: () => handleClose(ctxMenu.order),
+            disabled: !isMaintenance || ctxMenu.order.status !== 'completed',
+          },
+          {
+            label: 'Cancel / Void',
+            onClick: () => handleCancel(ctxMenu.order),
+            disabled: !isMaintenance || !['submitted', 'dispatched'].includes(ctxMenu.order.status),
+          },
+          {
+            label: 'Export / Print',
+            onClick: () => navigate(`/work-orders/${ctxMenu.order.id}`),
+          },
         ]} />
       )}
 
       {/* Create Modal */}
       {showCreate && (
-        <Modal title="New Work Order" onClose={() => { setShowCreate(false); setCreateErr(''); }} width={500}>
+        <Modal title="New Work Order" onClose={() => { setShowCreate(false); setCreateErr(''); setSelectedFiles([]); }} width={500}>
           {createErr && <div style={{ color: '#dc3545', marginBottom: '0.75rem', fontSize: '0.85rem' }}>{createErr}</div>}
           <div style={{ marginBottom: '0.75rem' }}>
             <label style={{ display: 'block', marginBottom: '0.25rem', fontWeight: 500 }}>Trade *</label>
@@ -241,13 +283,28 @@ const WorkOrdersPage: React.FC = () => {
             <textarea value={createForm.description} onChange={e => setCreateForm({ ...createForm, description: e.target.value })}
               rows={4} style={{ ...inputStyle, resize: 'vertical' }} placeholder="Describe the issue..." />
           </div>
-          <div style={{ marginBottom: '1rem' }}>
+          <div style={{ marginBottom: '0.75rem' }}>
             <label style={{ display: 'block', marginBottom: '0.25rem', fontWeight: 500 }}>Location *</label>
             <input value={createForm.location} onChange={e => setCreateForm({ ...createForm, location: e.target.value })}
               style={inputStyle} placeholder="Building, floor, room..." />
           </div>
+          <div style={{ marginBottom: '1rem' }}>
+            <label style={{ display: 'block', marginBottom: '0.25rem', fontWeight: 500 }}>Photos (optional)</label>
+            <input
+              type="file"
+              multiple
+              accept="image/*,application/pdf"
+              onChange={e => setSelectedFiles(Array.from(e.target.files || []))}
+              style={{ width: '100%', fontSize: '0.85rem' }}
+            />
+            {selectedFiles.length > 0 && (
+              <div style={{ marginTop: '0.3rem', fontSize: '0.8rem', color: '#666' }}>
+                {selectedFiles.length} file{selectedFiles.length > 1 ? 's' : ''} selected
+              </div>
+            )}
+          </div>
           <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
-            <button onClick={() => { setShowCreate(false); setCreateErr(''); }} style={btnSecondary}>Cancel</button>
+            <button onClick={() => { setShowCreate(false); setCreateErr(''); setSelectedFiles([]); }} style={btnSecondary}>Cancel</button>
             <button onClick={handleCreate} disabled={createSubmitting} style={createSubmitting ? btnDisabled : btnPrimary}>
               {createSubmitting ? 'Creating...' : 'Create Work Order'}
             </button>

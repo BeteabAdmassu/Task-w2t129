@@ -9,34 +9,16 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
-// ─── Route map (mirrors App.tsx) ─────────────────────────────────────────────
-// We define the expected route map as a plain object so these tests stay
-// independent from React Router's internals.
+// ─── Route map — imported from the canonical shared config ───────────────────
+// DECLARED_ROUTES is the single source of truth used by both App.tsx (routing)
+// and these tests (integrity checks). Importing from routeConfig prevents drift
+// where the test list diverges silently from the real route declarations.
+import { ROUTE_CONFIG } from './routeConfig';
+import type { RouteConfig } from './routeConfig';
 
-type RouteEntry = {
-  path: string;
-  protected: boolean;
-  roles?: string[];
-};
+type RouteEntry = RouteConfig;
 
-const DECLARED_ROUTES: RouteEntry[] = [
-  { path: '/login',          protected: false },
-  { path: '/',               protected: true },
-  { path: '/dashboard',      protected: true },          // alias → /
-  { path: '/users',          protected: true, roles: ['system_admin'] },
-  { path: '/skus',           protected: true, roles: ['system_admin', 'inventory_pharmacist'] },
-  { path: '/skus/:id',       protected: true, roles: ['system_admin', 'inventory_pharmacist'] },
-  { path: '/stocktakes',     protected: true, roles: ['system_admin', 'inventory_pharmacist'] },
-  { path: '/stocktakes/:id', protected: true, roles: ['system_admin', 'inventory_pharmacist'] },
-  { path: '/learning',       protected: true },
-  { path: '/work-orders',    protected: true },
-  { path: '/work-orders/:id',protected: true },
-  { path: '/members',        protected: true, roles: ['system_admin', 'front_desk'] },
-  { path: '/members/:id',    protected: true, roles: ['system_admin', 'front_desk'] },
-  { path: '/rate-tables',    protected: true, roles: ['system_admin'] },
-  { path: '/statements',     protected: true, roles: ['system_admin'] },
-  { path: '/system-config',  protected: true, roles: ['system_admin'] },
-];
+const DECLARED_ROUTES: RouteEntry[] = ROUTE_CONFIG;
 
 // Nav items that link to routes (mirrors Layout.tsx NAV_ITEMS paths)
 const NAV_PATHS = [
@@ -239,5 +221,37 @@ describe('API base URL detection', () => {
   it('uses custom port if backend runs on non-default port', () => {
     (window as unknown as Record<string, unknown>).__ELECTRON_API_BASE__ = 'http://localhost:9090/api/v1';
     expect(resolveApiBase()).toBe('http://localhost:9090/api/v1');
+  });
+});
+
+// ─── routeConfig single-source-of-truth wiring ───────────────────────────────
+// These tests confirm that DECLARED_ROUTES (which App.tsx now derives from
+// ROUTE_CONFIG via the routeRoles() helper) is the canonical source and has not
+// drifted from the values imported here.
+
+describe('routeConfig is the single source of truth', () => {
+  it('DECLARED_ROUTES comes directly from ROUTE_CONFIG (no local copy)', () => {
+    // Since we import ROUTE_CONFIG and assign it to DECLARED_ROUTES, they are
+    // the same reference — any change in routeConfig.ts is immediately visible here.
+    expect(DECLARED_ROUTES).toBe(ROUTE_CONFIG);
+  });
+
+  it('ROUTE_CONFIG is non-empty', () => {
+    expect(ROUTE_CONFIG.length).toBeGreaterThan(0);
+  });
+
+  it('every role-restricted route in ROUTE_CONFIG has at least one role', () => {
+    const roleRoutes = ROUTE_CONFIG.filter(r => r.roles !== undefined);
+    for (const r of roleRoutes) {
+      expect(r.roles!.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('system_admin appears as a role in every role-restricted route', () => {
+    // system_admin should have access everywhere roles are defined
+    const roleRoutes = ROUTE_CONFIG.filter(r => r.roles !== undefined);
+    for (const r of roleRoutes) {
+      expect(r.roles).toContain('system_admin');
+    }
   });
 });

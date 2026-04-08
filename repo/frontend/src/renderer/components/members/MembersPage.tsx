@@ -181,9 +181,27 @@ const MembersPage: React.FC = () => {
       {/* Context Menu */}
       {ctxMenu && (
         <ContextMenu x={ctxMenu.x} y={ctxMenu.y} onClose={() => setCtxMenu(null)} items={[
-          { label: 'View Details', onClick: () => navigate(`/members/${ctxMenu.member.id}`) },
-          { label: 'Freeze', onClick: () => handleFreeze(ctxMenu.member), disabled: ctxMenu.member.status === 'frozen' },
-          { label: 'Unfreeze', onClick: () => handleUnfreeze(ctxMenu.member), disabled: ctxMenu.member.status !== 'frozen' },
+          { label: 'View Details / Edit', onClick: () => navigate(`/members/${ctxMenu.member.id}`) },
+          {
+            label: 'Add Value / Top-Up',
+            onClick: () => navigate(`/members/${ctxMenu.member.id}`),
+            disabled: ctxMenu.member.status === 'frozen' || ctxMenu.member.status === 'expired',
+          },
+          {
+            label: 'Redeem Benefit',
+            onClick: () => navigate(`/members/${ctxMenu.member.id}`),
+            disabled: ctxMenu.member.status !== 'active',
+          },
+          {
+            label: 'Freeze',
+            onClick: () => handleFreeze(ctxMenu.member),
+            disabled: ctxMenu.member.status === 'frozen',
+          },
+          {
+            label: 'Unfreeze',
+            onClick: () => handleUnfreeze(ctxMenu.member),
+            disabled: ctxMenu.member.status !== 'frozen',
+          },
         ]} />
       )}
 

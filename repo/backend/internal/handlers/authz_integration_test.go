@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -476,3 +478,78 @@ func TestRoleMiddleware_CorrectRole_Passes(t *testing.T) {
 		t.Errorf("correct role should yield 200; got %d", rec.Code)
 	}
 }
+
+// ─── Sensitive-field reveal endpoint authz tests ──────────────────────────────
+
+// TestRevealSensitiveFields_FrontDesk_Forbidden verifies that a front_desk user
+// receives HTTP 403 when trying to access the sensitive-field reveal endpoint.
+// The adminRole middleware fires before the handler, so the nil repo is never reached.
+func TestRevealSensitiveFields_FrontDesk_Forbidden(t *testing.T) {
+	h := &MemberHandler{repo: nil, encryptKey: make([]byte, 32)}
+	adminMW := middleware.RequireRole("system_admin")
+
+	c, rec := echoCtx(http.MethodGet, "/members/some-id/sensitive", "u-frontdesk", "front_desk")
+	c.SetParamNames("id")
+	c.SetParamValues("some-id")
+
+	wrapped := adminMW(h.RevealSensitiveFields)
+	if err := wrapped(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("front_desk should get 403 on reveal endpoint; got %d", rec.Code)
+	}
+}
+
+// TestRevealSensitiveFields_Admin_PassesMiddleware verifies that a system_admin
+// user is allowed through the adminRole middleware on the reveal endpoint.
+// (Handler will fail because repo is nil — we only check middleware passes.)
+func TestRevealSensitiveFields_Admin_PassesMiddleware(t *testing.T) {
+	adminMW := middleware.RequireRole("system_admin")
+
+	c, rec := echoCtx(http.MethodGet, "/members/some-id/sensitive", "u-admin", "system_admin")
+	c.SetParamNames("id")
+	c.SetParamValues("some-id")
+
+	// Replace handler with a sentinel that records it was called
+	called := false
+	wrapped := adminMW(func(c echo.Context) error {
+		called = true
+		return c.String(http.StatusOK, `{"member_id":"some-id"}`)
+	})
+	if err := wrapped(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("system_admin should pass middleware; got %d", rec.Code)
+	}
+	if !called {
+		t.Error("handler was not called for system_admin")
+	}
+}
+
+// ─── ApplyUpdate versioned response tests ────────────────────────────────────
+
+// TestExtractPackageVersion_ReturnsVersionFile verifies extractPackageVersion
+// reads VERSION file content from a directory.
+func TestExtractPackageVersion_ReturnsVersionFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "VERSION"), []byte("2.3.1\n"), 0644); err != nil {
+		t.Fatalf("failed to create VERSION file: %v", err)
+	}
+	got := extractPackageVersion(dir, "fallback")
+	if got != "2.3.1" {
+		t.Errorf("expected version 2.3.1; got %q", got)
+	}
+}
+
+// TestExtractPackageVersion_FallbackWhenMissing verifies extractPackageVersion
+// returns the fallback when no VERSION file is present.
+func TestExtractPackageVersion_FallbackWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	got := extractPackageVersion(dir, "20260101T000000Z")
+	if got != "20260101T000000Z" {
+		t.Errorf("expected fallback; got %q", got)
+	}
+}
+

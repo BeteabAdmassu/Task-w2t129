@@ -210,6 +210,8 @@ func main() {
 	mem.POST("/:id/add-value", memberHandler.AddValue)
 	mem.POST("/:id/refund", memberHandler.RefundStoredValue)
 	mem.GET("/:id/transactions", memberHandler.ListTransactions)
+	// Sensitive-field reveal — system_admin only (adminRole is applied in addition to the group's frontDeskRole)
+	mem.GET("/:id/sensitive", memberHandler.RevealSensitiveFields, adminRole)
 	api.GET("/membership-tiers", memberHandler.ListTiers, authMW, frontDeskRole)
 
 	// Rate Tables & Charges (admin role)

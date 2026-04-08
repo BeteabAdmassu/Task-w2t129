@@ -4,31 +4,29 @@ Base URL: `http://localhost:{PORT}/api/v1`
 
 ## Authentication
 
-Local session-based authentication. Login returns a session token sent as `Authorization: Bearer <token>` header on subsequent requests.
+Stateless JWT authentication. Login returns a signed JWT sent as `Authorization: Bearer <token>` header on subsequent requests.
 
 - Passwords: minimum 12 characters
 - Lockout: 5 failed attempts → 15-minute lockout
-- Sessions are stored server-side; token is an opaque random string
+- Tokens are JWTs (HS256) signed with `JWT_SECRET`; they carry `user_id` and `role` claims and expire after 24 hours
 
 ## Error Response Format
 ```json
 {
-  "error": {
-    "code": "VALIDATION_ERROR",
-    "message": "Human-readable message",
-    "details": {}
-  }
+  "error": "Human-readable message",
+  "code": 400,
+  "details": "Optional additional context"
 }
 ```
 
-Standard error codes:
-- `VALIDATION_ERROR` (400) — invalid input
-- `UNAUTHORIZED` (401) — not logged in or session expired
-- `FORBIDDEN` (403) — role lacks permission
-- `NOT_FOUND` (404) — resource doesn't exist
-- `CONFLICT` (409) — duplicate or state conflict
-- `ACCOUNT_LOCKED` (423) — too many failed login attempts
-- `INTERNAL_ERROR` (500) — unexpected server error
+Standard HTTP status codes used:
+- `400` — invalid input / validation error
+- `401` — not logged in or token expired
+- `403` — role lacks permission
+- `404` — resource doesn't exist
+- `409` — duplicate or state conflict
+- `423` — too many failed login attempts (account locked)
+- `500` — unexpected server error
 
 ## Pagination
 
@@ -40,12 +38,9 @@ Response includes:
 ```json
 {
   "data": [...],
-  "pagination": {
-    "page": 1,
-    "page_size": 25,
-    "total_items": 142,
-    "total_pages": 6
-  }
+  "total": 142,
+  "page": 1,
+  "page_size": 25
 }
 ```
 
@@ -58,7 +53,7 @@ Response includes:
 | POST | /auth/login | No | Login | `{username, password}` | `{token, user}` | 401, 423 |
 | POST | /auth/logout | Yes | Logout | — | 204 | 401 |
 | GET | /auth/me | Yes | Current user | — | `{user}` | 401 |
-| PUT | /auth/password | Yes | Change password | `{current_password, new_password}` | 204 | 400, 401 |
+| PUT | /auth/password | Yes | Change password | `{old_password, new_password}` | 204 | 400, 401 |
 
 ### Users (Admin only)
 
@@ -126,6 +121,12 @@ Response includes:
 | POST | /work-orders/:id/rate | Any | Rate | `{rating}` (1-5) | `{work_order}` | 400 |
 | GET | /work-orders/analytics | Maintenance | Trends | query: `?from=&to=` | `{analytics}` | — |
 
+### Sensitive-field masking policy
+
+`GET /members` and `GET /members/:id` return `[REDACTED]` for `verification_status`, `deposits`, and `violation_notes` for all callers except `system_admin`.
+
+`system_admin` callers may call the dedicated reveal endpoint below; every call is audit-logged server-side.
+
 ### Memberships
 
 | Method | Path | Auth | Description | Request Body | Response | Errors |
@@ -140,6 +141,7 @@ Response includes:
 | POST | /members/:id/add-value | FrontDesk | Top up | `{type, amount}` | `{transaction}` | 400 |
 | POST | /members/:id/refund | FrontDesk | Refund stored value | `{deposit_id, amount}` | `{transaction}` | 400 (>7 days/used) |
 | GET | /members/:id/transactions | FrontDesk | History | — | `{data[], pagination}` | 404 |
+| GET | /members/:id/sensitive | Admin | Reveal decrypted sensitive fields (audit-logged) | — | `{member_id, verification_status, deposits, violation_notes}` | 403, 404 |
 | GET | /membership-tiers | FrontDesk | List tiers | — | `{data[]}` | — |
 
 ### Charges & Settlement
@@ -172,8 +174,8 @@ Response includes:
 | GET | /health | No | Health check | — | `{status, version, uptime}` | — |
 | POST | /system/backup | Admin | Trigger backup | — | `{backup_id, status}` | 500 |
 | GET | /system/backup/status | Admin | Backup progress | — | `{status, last_backup_at}` | — |
-| POST | /system/update | Admin | Import update pkg | multipart: file | `{version, status}` | 400 |
-| POST | /system/rollback | Admin | Rollback | — | `{version, status}` | 400 (no previous) |
+| POST | /system/update | Admin | Import update pkg (multipart `.zip` or `.sql`; falls back to pre-staged `DATA_DIR/updates/pending/` if no file uploaded). Package may include a `VERSION` file whose content becomes the version label. | multipart: `file` (optional) | `{version, status:"applied", migrations, applied_at}` | 400, 404 |
+| POST | /system/rollback | Admin | Restore DB from most-recent backup. **Note:** rolls back database state only; app-binary rollback requires manual intervention. | — | `{version, status:"rolled_back", restored_from, rolled_back_at}` | 400, 404, 500 |
 | GET | /system/config | Admin | Get config | — | `{config}` | — |
 | PUT | /system/config | Admin | Update config | `{key: value, ...}` | `{config}` | 400 |
 

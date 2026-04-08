@@ -106,8 +106,8 @@ export const learningAPI = {
     api.get('/learning/search', { params }),
   importContent: (formData: FormData) =>
     api.post('/learning/import', formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
-  exportContent: (id: string) =>
-    api.get(`/learning/export/${id}`, { responseType: 'blob' }),
+  exportContent: (id: string, format: 'md' | 'html' = 'md') =>
+    api.get(`/learning/export/${id}`, { params: { format }, responseType: 'blob' }),
 };
 
 // Work Orders

@@ -1,12 +1,15 @@
 package handlers
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -179,20 +182,140 @@ func (h *SystemHandler) UpdateConfig(c echo.Context) error {
 	})
 }
 
-// ApplyUpdate applies a pending offline update package from DATA_DIR/updates/.
-// The package is a directory named "pending" containing SQL migration files and
-// an optional shell script "post_migrate.sh". After a successful apply the
-// directory is renamed to "applied_<timestamp>" for audit purposes.
+// extractPackageVersion reads the VERSION or version.txt file from a directory.
+// Falls back to the supplied fallback string when the file is absent or empty.
+func extractPackageVersion(dir, fallback string) string {
+	for _, name := range []string{"VERSION", "version.txt"} {
+		if data, err := os.ReadFile(filepath.Join(dir, name)); err == nil {
+			v := strings.TrimSpace(string(data))
+			if v != "" {
+				return v
+			}
+		}
+	}
+	return fallback
+}
+
+// extractZIPToDir extracts .sql files from a ZIP archive into destDir.
+func extractZIPToDir(zipPath, destDir string) error {
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return fmt.Errorf("open zip: %w", err)
+	}
+	defer r.Close()
+	for _, f := range r.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		if strings.ToLower(filepath.Ext(f.Name)) != ".sql" {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return fmt.Errorf("open entry %s: %w", f.Name, err)
+		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return fmt.Errorf("read entry %s: %w", f.Name, err)
+		}
+		dest := filepath.Join(destDir, filepath.Base(f.Name))
+		if err := os.WriteFile(dest, data, 0644); err != nil {
+			return fmt.Errorf("write %s: %w", filepath.Base(f.Name), err)
+		}
+	}
+	return nil
+}
+
+// ApplyUpdate accepts an offline update package (multipart file upload: .zip or .sql),
+// stages it in DATA_DIR/updates/pending/, then applies all SQL migrations in lexicographic order.
+// If no file is uploaded it falls back to a pre-staged pending directory.
+// After a successful apply the directory is renamed to "applied_<timestamp>" for audit purposes.
 func (h *SystemHandler) ApplyUpdate(c echo.Context) error {
 	userID := middleware.GetUserID(c)
 
 	updateDir := filepath.Join(h.dataDir, "updates", "pending")
-	if _, err := os.Stat(updateDir); os.IsNotExist(err) {
-		return c.JSON(http.StatusNotFound, models.ErrorResponse{
-			Error:   "No pending update found",
-			Code:    http.StatusNotFound,
-			Details: "Place the update package in " + updateDir + " before calling this endpoint",
-		})
+
+	// Accept an uploaded package file via multipart (takes priority over pre-staged dir).
+	uploadedFile, uploadErr := c.FormFile("file")
+	if uploadErr == nil {
+		src, err := uploadedFile.Open()
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error: "Failed to read uploaded file",
+				Code:  http.StatusInternalServerError,
+			})
+		}
+		defer src.Close()
+
+		if err := os.MkdirAll(updateDir, 0755); err != nil {
+			return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error: "Failed to prepare update directory",
+				Code:  http.StatusInternalServerError,
+			})
+		}
+
+		ext := strings.ToLower(filepath.Ext(uploadedFile.Filename))
+		switch ext {
+		case ".zip":
+			tmpZip := filepath.Join(h.dataDir, "updates", "upload_"+time.Now().UTC().Format("20060102T150405Z")+".zip")
+			dst, err := os.Create(tmpZip)
+			if err != nil {
+				return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+					Error: "Failed to save uploaded package",
+					Code:  http.StatusInternalServerError,
+				})
+			}
+			if _, err := io.Copy(dst, src); err != nil {
+				dst.Close()
+				os.Remove(tmpZip)
+				return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+					Error: "Failed to write uploaded package",
+					Code:  http.StatusInternalServerError,
+				})
+			}
+			dst.Close()
+			if err := extractZIPToDir(tmpZip, updateDir); err != nil {
+				os.Remove(tmpZip)
+				return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+					Error:   "Failed to extract update package",
+					Code:    http.StatusBadRequest,
+					Details: err.Error(),
+				})
+			}
+			os.Remove(tmpZip)
+		case ".sql":
+			dst, err := os.Create(filepath.Join(updateDir, filepath.Base(uploadedFile.Filename)))
+			if err != nil {
+				return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+					Error: "Failed to stage SQL migration",
+					Code:  http.StatusInternalServerError,
+				})
+			}
+			if _, err := io.Copy(dst, src); err != nil {
+				dst.Close()
+				return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+					Error: "Failed to write SQL migration",
+					Code:  http.StatusInternalServerError,
+				})
+			}
+			dst.Close()
+		default:
+			return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+				Error:   "Unsupported package format",
+				Code:    http.StatusBadRequest,
+				Details: "Upload a .zip package or a single .sql migration file",
+			})
+		}
+	} else {
+		// No upload — require a pre-staged pending directory.
+		if _, err := os.Stat(updateDir); os.IsNotExist(err) {
+			return c.JSON(http.StatusNotFound, models.ErrorResponse{
+				Error:   "No pending update found",
+				Code:    http.StatusNotFound,
+				Details: "Upload a .zip or .sql package via multipart, or stage files in " + updateDir,
+			})
+		}
 	}
 
 	// Run any .sql migration files in the package, ordered lexicographically.
@@ -230,8 +353,11 @@ func (h *SystemHandler) ApplyUpdate(c echo.Context) error {
 		applied++
 	}
 
-	// Rename pending → applied_<timestamp> for auditability.
+	// Extract version before renaming the directory.
 	timestamp := time.Now().UTC().Format("20060102T150405Z")
+	version := extractPackageVersion(updateDir, timestamp)
+
+	// Rename pending → applied_<timestamp> for auditability.
 	appliedDir := filepath.Join(h.dataDir, "updates", "applied_"+timestamp)
 	if err := os.Rename(updateDir, appliedDir); err != nil {
 		logrus.WithError(err).Warn("Failed to rename applied update directory")
@@ -241,20 +367,21 @@ func (h *SystemHandler) ApplyUpdate(c echo.Context) error {
 		UserID:     userID,
 		Action:     "apply_update",
 		EntityType: "system",
-		EntityID:   "update",
+		EntityID:   version,
 	})
 
 	logrus.WithFields(logrus.Fields{
 		"user_id":      userID,
+		"version":      version,
 		"migrations":   applied,
 		"applied_path": appliedDir,
 	}).Info("Offline update applied")
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":      "Update applied successfully",
-		"migrations":   applied,
-		"applied_path": appliedDir,
-		"timestamp":    timestamp,
+		"version":    version,
+		"status":     "applied",
+		"migrations": applied,
+		"applied_at": timestamp,
 	})
 }
 
@@ -299,21 +426,33 @@ func (h *SystemHandler) Rollback(c echo.Context) error {
 		})
 	}
 
+	// Derive a version label from the backup filename (backup_YYYYMMDDTHHMMSSZ.sql → YYYYMMDDTHHMMSSZ).
+	backupBase := filepath.Base(latestBackup)
+	rollbackVersion := strings.TrimSuffix(strings.TrimPrefix(backupBase, "backup_"), ".sql")
+	if rollbackVersion == backupBase {
+		rollbackVersion = backupBase // filename didn't match expected pattern; use it as-is
+	}
+
+	rolledBackAt := time.Now().UTC().Format(time.RFC3339)
+
 	h.repo.CreateAuditLog(&models.AuditLogEntry{
 		UserID:     userID,
 		Action:     "rollback_completed",
 		EntityType: "system",
-		EntityID:   "rollback",
+		EntityID:   rollbackVersion,
 	})
 
 	logrus.WithFields(logrus.Fields{
-		"user_id":        userID,
-		"restored_from":  latestBackup,
+		"user_id":          userID,
+		"rollback_version": rollbackVersion,
+		"restored_from":    latestBackup,
 	}).Info("Rollback completed")
 
-	return c.JSON(http.StatusOK, map[string]string{
-		"message":       "Rollback completed successfully",
-		"restored_from": latestBackup,
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"version":        rollbackVersion,
+		"status":         "rolled_back",
+		"restored_from":  latestBackup,
+		"rolled_back_at": rolledBackAt,
 	})
 }
 

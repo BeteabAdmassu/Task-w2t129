@@ -40,6 +40,9 @@ const mockUsersList = vi.hoisted(() =>
 const mockSystemHealth = vi.hoisted(() =>
   vi.fn().mockResolvedValue({ data: { status: 'ok' } })
 );
+const mockLearningExport = vi.hoisted(() => vi.fn());
+const mockFilesUpload = vi.hoisted(() => vi.fn());
+const mockWorkOrdersLinkPhoto = vi.hoisted(() => vi.fn());
 
 vi.mock('../services/api', () => ({
   authAPI: {
@@ -66,8 +69,19 @@ vi.mock('../services/api', () => ({
     listWorkOrders: vi.fn(),
     get: mockWorkOrdersGet,
     list: mockWorkOrdersList,
+    linkPhoto: mockWorkOrdersLinkPhoto,
   },
-  learningAPI: { listSubjects: vi.fn(), listChapters: vi.fn() },
+  filesAPI: {
+    upload: mockFilesUpload,
+    download: vi.fn(),
+  },
+  learningAPI: {
+    listSubjects: vi.fn().mockResolvedValue({ data: { data: [], total: 0 } }),
+    listChapters: vi.fn().mockResolvedValue({ data: { data: [], total: 0 } }),
+    listKnowledgePoints: vi.fn().mockResolvedValue({ data: { data: [], total: 0 } }),
+    searchKnowledgePoints: vi.fn().mockResolvedValue({ data: { data: [], total: 0 } }),
+    exportContent: mockLearningExport,
+  },
 }));
 
 // ─── Import pages AFTER mocks are in place ────────────────────────────────────
@@ -254,6 +268,7 @@ describe('App routing — authenticated access', () => {
 // ─── WorkOrderDetailPage envelope parsing tests ───────────────────────────────
 
 import WorkOrderDetailPage from '../components/workorders/WorkOrderDetailPage';
+import LearningPage from '../components/learning/LearningPage';
 
 const baseWorkOrder = {
   id: 'wo-abc-123',
@@ -348,6 +363,175 @@ describe('WorkOrderDetailPage — API envelope parsing', () => {
 
     await waitFor(() => {
       expect(screen.getByText(/work order not found/i)).toBeTruthy();
+    });
+  });
+});
+
+// ─── WorkOrderDetailPage — attach-after-create photo flow (B-003) ─────────────
+
+describe('WorkOrderDetailPage — attach-after-create photo flow', () => {
+  beforeEach(() => {
+    mockUseAuth.isAuthenticated = true;
+    mockUseAuth.user = { id: 'uid-tech', username: 'tech', role: 'maintenance_tech' };
+    mockWorkOrdersGet.mockReset();
+    mockFilesUpload.mockReset();
+    mockWorkOrdersLinkPhoto.mockReset();
+  });
+
+  it('renders a file input for attaching photos when order is not closed', async () => {
+    mockWorkOrdersGet.mockResolvedValueOnce({
+      data: { work_order: { ...baseWorkOrder, status: 'submitted' }, photos: [] },
+    });
+
+    renderDetailPage();
+
+    await waitFor(() => {
+      expect(screen.getByText(/wo-abc-1/i)).toBeTruthy();
+    });
+
+    // File input should be present since order is not closed
+    const fileInput = document.querySelector('input[type="file"]');
+    expect(fileInput).toBeTruthy();
+  });
+
+  it('shows no file input when order status is closed', async () => {
+    mockWorkOrdersGet.mockResolvedValueOnce({
+      data: { work_order: { ...baseWorkOrder, status: 'closed' }, photos: [] },
+    });
+
+    renderDetailPage();
+
+    await waitFor(() => {
+      expect(screen.getByText(/wo-abc-1/i)).toBeTruthy();
+    });
+
+    // File input hidden for closed orders
+    const fileInput = document.querySelector('input[type="file"]');
+    expect(fileInput).toBeNull();
+  });
+
+  it('calls filesAPI.upload and workOrdersAPI.linkPhoto when attach button is clicked', async () => {
+    mockWorkOrdersGet
+      .mockResolvedValueOnce({ data: { work_order: { ...baseWorkOrder, status: 'submitted' }, photos: [] } })
+      .mockResolvedValueOnce({ data: { work_order: { ...baseWorkOrder, status: 'submitted' }, photos: [] } }); // refetch after attach
+
+    const fakeFileId = 'file-uuid-999';
+    mockFilesUpload.mockResolvedValueOnce({ data: { file: { id: fakeFileId } } });
+    mockWorkOrdersLinkPhoto.mockResolvedValueOnce({ data: {} });
+
+    renderDetailPage();
+
+    await waitFor(() => {
+      expect(screen.getByText(/wo-abc-1/i)).toBeTruthy();
+    });
+
+    // Simulate selecting a file
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(fileInput).toBeTruthy();
+
+    const mockFile = new File(['photo data'], 'photo.jpg', { type: 'image/jpeg' });
+    Object.defineProperty(fileInput, 'files', { value: [mockFile], writable: false, configurable: true });
+    fireEvent.change(fileInput);
+
+    // Attach button should appear
+    const attachBtn = await waitFor(() => screen.getByRole('button', { name: /attach 1 file/i }));
+    expect(attachBtn).toBeTruthy();
+
+    fireEvent.click(attachBtn);
+
+    await waitFor(() => {
+      expect(mockFilesUpload).toHaveBeenCalledTimes(1);
+      expect(mockWorkOrdersLinkPhoto).toHaveBeenCalledWith('wo-abc-123', fakeFileId);
+    });
+  });
+});
+
+// ─── LearningPage — export format selector (B-002) ───────────────────────────
+
+import { learningAPI as learningAPIMock } from '../services/api';
+
+describe('LearningPage — export format selector passes correct format', () => {
+  // Helpers to drive the three-panel learning UI to show a KP
+  const subject = { id: 'subj-1', name: 'Pharmacology', description: '', sort_order: 0 };
+  const chapter = { id: 'chap-1', name: 'Chapter 1', subject_id: 'subj-1', sort_order: 0 };
+  const kp = { id: 'kp-1', title: 'Aspirin', content: 'Aspirin content', chapter_id: 'chap-1', tags: [], classifications: {} };
+
+  beforeEach(() => {
+    mockUseAuth.isAuthenticated = true;
+    mockUseAuth.user = { id: '1', username: 'admin', role: 'system_admin' };
+    mockLearningExport.mockReset();
+
+    (learningAPIMock.listSubjects as ReturnType<typeof vi.fn>).mockResolvedValue({
+      data: { data: [subject] },
+    });
+    (learningAPIMock.listChapters as ReturnType<typeof vi.fn>).mockResolvedValue({
+      data: { data: [chapter] },
+    });
+    (learningAPIMock.listKnowledgePoints as ReturnType<typeof vi.fn>).mockResolvedValue({
+      data: { data: [kp], total: 1 },
+    });
+    mockLearningExport.mockResolvedValue({ data: new Blob(['# Aspirin'], { type: 'text/markdown' }) });
+
+    // Stub URL methods used by download logic
+    (window.URL.createObjectURL as unknown) = vi.fn(() => 'blob:mock');
+    (window.URL.revokeObjectURL as unknown) = vi.fn();
+  });
+
+  function renderLearningPage() {
+    return render(
+      <MemoryRouter initialEntries={['/learning']}>
+        <Routes>
+          <Route path="*" element={<LearningPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it('calls exportContent with "md" by default when Export is clicked', async () => {
+    renderLearningPage();
+
+    // Wait for subjects to load and click the first one
+    const subjectItem = await waitFor(() => screen.getByText('Pharmacology'));
+    fireEvent.click(subjectItem);
+
+    // Wait for chapter to appear and click it
+    const chapterItem = await waitFor(() => screen.getByText('Chapter 1'));
+    fireEvent.click(chapterItem);
+
+    // Wait for KP to appear
+    await waitFor(() => screen.getByText('Aspirin'));
+
+    // Click Export without changing format (default is md)
+    const exportBtn = screen.getByRole('button', { name: /^export$/i });
+    fireEvent.click(exportBtn);
+
+    await waitFor(() => {
+      expect(mockLearningExport).toHaveBeenCalledWith('kp-1', 'md');
+    });
+  });
+
+  it('calls exportContent with "html" when format selector is changed to HTML', async () => {
+    renderLearningPage();
+
+    const subjectItem = await waitFor(() => screen.getByText('Pharmacology'));
+    fireEvent.click(subjectItem);
+
+    const chapterItem = await waitFor(() => screen.getByText('Chapter 1'));
+    fireEvent.click(chapterItem);
+
+    await waitFor(() => screen.getByText('Aspirin'));
+
+    // Change the format selector to html
+    const formatSelect = screen.getByTitle('Export format') as HTMLSelectElement;
+    fireEvent.change(formatSelect, { target: { value: 'html' } });
+    expect(formatSelect.value).toBe('html');
+
+    // Now click Export
+    const exportBtn = screen.getByRole('button', { name: /^export$/i });
+    fireEvent.click(exportBtn);
+
+    await waitFor(() => {
+      expect(mockLearningExport).toHaveBeenCalledWith('kp-1', 'html');
     });
   });
 });

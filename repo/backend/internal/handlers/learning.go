@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"html"
 	"io"
 	"net/http"
 	"strconv"
@@ -629,13 +630,26 @@ func (h *LearningHandler) ImportContent(c echo.Context) error {
 	return c.JSON(http.StatusCreated, kp)
 }
 
-// ExportContent returns a knowledge point's content as markdown.
+// ExportContent returns a knowledge point's content as markdown or HTML.
+// The optional ?format=md|html query parameter selects the output format (default: md).
 func (h *LearningHandler) ExportContent(c echo.Context) error {
 	id := c.Param("id")
 	if id == "" {
 		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error: "Knowledge point ID is required",
 			Code:  http.StatusBadRequest,
+		})
+	}
+
+	format := c.QueryParam("format")
+	if format == "" {
+		format = "md"
+	}
+	if format != "md" && format != "html" {
+		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Invalid format parameter",
+			Code:    http.StatusBadRequest,
+			Details: "Use ?format=md or ?format=html",
 		})
 	}
 
@@ -648,7 +662,53 @@ func (h *LearningHandler) ExportContent(c echo.Context) error {
 		})
 	}
 
-	// Build markdown output
+	if format == "html" {
+		var sb strings.Builder
+		sb.WriteString("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n")
+		sb.WriteString("<title>")
+		sb.WriteString(html.EscapeString(kp.Title))
+		sb.WriteString("</title>\n</head>\n<body>\n")
+		sb.WriteString("<h1>")
+		sb.WriteString(html.EscapeString(kp.Title))
+		sb.WriteString("</h1>\n")
+		for _, line := range strings.Split(kp.Content, "\n") {
+			trimmed := strings.TrimSpace(line)
+			switch {
+			case strings.HasPrefix(trimmed, "### "):
+				sb.WriteString("<h3>")
+				sb.WriteString(html.EscapeString(strings.TrimPrefix(trimmed, "### ")))
+				sb.WriteString("</h3>\n")
+			case strings.HasPrefix(trimmed, "## "):
+				sb.WriteString("<h2>")
+				sb.WriteString(html.EscapeString(strings.TrimPrefix(trimmed, "## ")))
+				sb.WriteString("</h2>\n")
+			case strings.HasPrefix(trimmed, "# "):
+				sb.WriteString("<h2>")
+				sb.WriteString(html.EscapeString(strings.TrimPrefix(trimmed, "# ")))
+				sb.WriteString("</h2>\n")
+			case trimmed == "---" || trimmed == "***":
+				sb.WriteString("<hr>\n")
+			case trimmed == "":
+				sb.WriteString("<br>\n")
+			default:
+				sb.WriteString("<p>")
+				sb.WriteString(html.EscapeString(trimmed))
+				sb.WriteString("</p>\n")
+			}
+		}
+		if len(kp.Tags) > 0 {
+			sb.WriteString("<hr>\n<p><strong>Tags:</strong> ")
+			sb.WriteString(html.EscapeString(strings.Join(kp.Tags, ", ")))
+			sb.WriteString("</p>\n")
+		}
+		sb.WriteString("</body>\n</html>")
+
+		c.Response().Header().Set("Content-Type", "text/html; charset=utf-8")
+		c.Response().Header().Set("Content-Disposition", "attachment; filename=\""+kp.Title+".html\"")
+		return c.String(http.StatusOK, sb.String())
+	}
+
+	// Default: markdown
 	var sb strings.Builder
 	sb.WriteString("# ")
 	sb.WriteString(kp.Title)

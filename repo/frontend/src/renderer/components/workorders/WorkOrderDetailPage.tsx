@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { workOrdersAPI } from '../../services/api';
+import { workOrdersAPI, filesAPI } from '../../services/api';
 import { useAuth } from '../../hooks/useAuth';
 import type { WorkOrder, ManagedFile } from '../../types';
 import LoadingSpinner from '../common/LoadingSpinner';
@@ -52,6 +52,11 @@ const WorkOrderDetailPage: React.FC = () => {
   // Rating
   const [rating, setRating] = useState(0);
   const [ratingSubmitted, setRatingSubmitted] = useState(false);
+
+  // Attach-after-create photo flow
+  const [attachFiles, setAttachFiles] = useState<File[]>([]);
+  const [attachLoading, setAttachLoading] = useState(false);
+  const [attachErr, setAttachErr] = useState('');
 
   const fetchOrder = async () => {
     if (!id) return;
@@ -126,6 +131,30 @@ const WorkOrderDetailPage: React.FC = () => {
       alert('Failed to rate: ' + (e.response?.data?.error || e.message));
     } finally {
       setActionLoading(false);
+    }
+  };
+
+  const handleAttachPhotos = async () => {
+    if (!id || attachFiles.length === 0) return;
+    setAttachLoading(true);
+    setAttachErr('');
+    try {
+      for (const file of attachFiles) {
+        const fd = new FormData();
+        fd.append('file', file);
+        const uploadRes = await filesAPI.upload(fd);
+        const fileObj = (uploadRes.data as any).file ?? uploadRes.data;
+        if (fileObj?.id) {
+          await workOrdersAPI.linkPhoto(id, fileObj.id);
+        }
+      }
+      setAttachFiles([]);
+      showSuccess(`${attachFiles.length} photo${attachFiles.length > 1 ? 's' : ''} attached`);
+      fetchOrder();
+    } catch (e: any) {
+      setAttachErr(e.response?.data?.error || 'Failed to attach photos');
+    } finally {
+      setAttachLoading(false);
     }
   };
 
@@ -234,6 +263,71 @@ const WorkOrderDetailPage: React.FC = () => {
           <p style={{ margin: '0.5rem 0 0', whiteSpace: 'pre-wrap' }}>{order.description}</p>
         </div>
       </div>
+
+      {/* Photos — view existing + attach new */}
+      {order.status !== 'closed' || photos.length > 0 ? (
+        <div style={cardStyle}>
+          <h3 style={{ margin: '0 0 1rem' }}>Photos {photos.length > 0 ? `(${photos.length})` : ''}</h3>
+
+          {/* Existing photos */}
+          {photos.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1rem' }}>
+              {photos.map(photo => (
+                <div key={photo.id} style={{
+                  border: '1px solid #e0e0e0', borderRadius: 4, padding: '0.75rem',
+                  minWidth: 150, maxWidth: 220, fontSize: '0.82rem',
+                }}>
+                  <div style={{ fontWeight: 500, wordBreak: 'break-all', marginBottom: '0.25rem' }}>{photo.original_name}</div>
+                  <div style={{ color: '#888', marginBottom: '0.5rem' }}>{(photo.size_bytes / 1024).toFixed(1)} KB</div>
+                  <button
+                    onClick={async () => {
+                      try {
+                        const res = await filesAPI.download(photo.id);
+                        const url = window.URL.createObjectURL(new Blob([res.data]));
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = photo.original_name;
+                        a.click();
+                        window.URL.revokeObjectURL(url);
+                      } catch {
+                        alert('Failed to download file');
+                      }
+                    }}
+                    style={{ ...btnPrimary, fontSize: '0.78rem', padding: '0.25rem 0.6rem' }}>
+                    Download
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {photos.length === 0 && <div style={{ color: '#999', marginBottom: '1rem', fontSize: '0.9rem' }}>No photos attached yet.</div>}
+
+          {/* Attach new photos (disabled when closed) */}
+          {order.status !== 'closed' && (
+            <div style={{ borderTop: photos.length > 0 ? '1px solid #f0f0f0' : 'none', paddingTop: photos.length > 0 ? '1rem' : 0 }}>
+              <div style={{ fontSize: '0.85rem', fontWeight: 500, marginBottom: '0.5rem', color: '#444' }}>Attach photos</div>
+              {attachErr && <div style={{ color: '#dc3545', fontSize: '0.82rem', marginBottom: '0.5rem' }}>{attachErr}</div>}
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                <input
+                  type="file"
+                  multiple
+                  accept="image/*,application/pdf"
+                  onChange={e => { setAttachFiles(Array.from(e.target.files || [])); setAttachErr(''); }}
+                  style={{ fontSize: '0.85rem' }}
+                />
+                {attachFiles.length > 0 && (
+                  <button
+                    onClick={handleAttachPhotos}
+                    disabled={attachLoading}
+                    style={attachLoading ? btnDisabled : btnPrimary}>
+                    {attachLoading ? 'Uploading...' : `Attach ${attachFiles.length} file${attachFiles.length > 1 ? 's' : ''}`}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      ) : null}
 
       {/* Maintenance Actions */}
       {isMaintenance && order.status !== 'closed' && (

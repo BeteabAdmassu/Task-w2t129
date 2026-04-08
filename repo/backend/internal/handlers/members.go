@@ -103,16 +103,33 @@ func (h *MemberHandler) ListMembers(c echo.Context) error {
 		})
 	}
 
-	// Decrypt sensitive fields for each member
+	// Sensitive fields are masked by default; only system_admin receives decrypted values.
+	callerRole := middleware.GetUserRole(c)
+	isPrivileged := callerRole == "system_admin"
+	if isPrivileged {
+		logrus.WithField("user_id", middleware.GetUserID(c)).Info("Privileged sensitive-field reveal on member list")
+	}
 	for i := range members {
-		if vs, err := h.decryptField(members[i].VerificationStatusEncrypted); err == nil {
-			members[i].VerificationStatus = vs
-		}
-		if dep, err := h.decryptField(members[i].DepositsEncrypted); err == nil {
-			members[i].Deposits = dep
-		}
-		if vn, err := h.decryptField(members[i].ViolationNotesEncrypted); err == nil {
-			members[i].ViolationNotes = vn
+		if isPrivileged {
+			if vs, err := h.decryptField(members[i].VerificationStatusEncrypted); err == nil {
+				members[i].VerificationStatus = vs
+			}
+			if dep, err := h.decryptField(members[i].DepositsEncrypted); err == nil {
+				members[i].Deposits = dep
+			}
+			if vn, err := h.decryptField(members[i].ViolationNotesEncrypted); err == nil {
+				members[i].ViolationNotes = vn
+			}
+		} else {
+			if len(members[i].VerificationStatusEncrypted) > 0 {
+				members[i].VerificationStatus = "[REDACTED]"
+			}
+			if len(members[i].DepositsEncrypted) > 0 {
+				members[i].Deposits = "[REDACTED]"
+			}
+			if len(members[i].ViolationNotesEncrypted) > 0 {
+				members[i].ViolationNotes = "[REDACTED]"
+			}
 		}
 	}
 
@@ -271,18 +288,100 @@ func (h *MemberHandler) GetMember(c echo.Context) error {
 		})
 	}
 
-	// Decrypt sensitive fields
-	if vs, err := h.decryptField(member.VerificationStatusEncrypted); err == nil {
-		member.VerificationStatus = vs
-	}
-	if dep, err := h.decryptField(member.DepositsEncrypted); err == nil {
-		member.Deposits = dep
-	}
-	if vn, err := h.decryptField(member.ViolationNotesEncrypted); err == nil {
-		member.ViolationNotes = vn
+	// Sensitive fields are masked by default; only system_admin receives decrypted values.
+	callerRole := middleware.GetUserRole(c)
+	if callerRole == "system_admin" {
+		logrus.WithFields(logrus.Fields{
+			"user_id":   middleware.GetUserID(c),
+			"member_id": id,
+		}).Info("Privileged sensitive-field reveal on member get")
+		if vs, err := h.decryptField(member.VerificationStatusEncrypted); err == nil {
+			member.VerificationStatus = vs
+		}
+		if dep, err := h.decryptField(member.DepositsEncrypted); err == nil {
+			member.Deposits = dep
+		}
+		if vn, err := h.decryptField(member.ViolationNotesEncrypted); err == nil {
+			member.ViolationNotes = vn
+		}
+	} else {
+		if len(member.VerificationStatusEncrypted) > 0 {
+			member.VerificationStatus = "[REDACTED]"
+		}
+		if len(member.DepositsEncrypted) > 0 {
+			member.Deposits = "[REDACTED]"
+		}
+		if len(member.ViolationNotesEncrypted) > 0 {
+			member.ViolationNotes = "[REDACTED]"
+		}
 	}
 
 	return c.JSON(http.StatusOK, member)
+}
+
+// RevealSensitiveFields returns the decrypted sensitive fields (verification_status,
+// deposits, violation_notes) for a single member.  Requires system_admin role
+// (enforced by route-level middleware).  Every call is audit-logged.
+func (h *MemberHandler) RevealSensitiveFields(c echo.Context) error {
+	id := c.Param("id")
+	userID := middleware.GetUserID(c)
+
+	if id == "" {
+		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error: "Member ID is required",
+			Code:  http.StatusBadRequest,
+		})
+	}
+
+	member, err := h.repo.GetMember(id)
+	if err != nil {
+		logrus.WithError(err).Error("Failed to get member for sensitive-field reveal")
+		return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error: "Failed to retrieve member",
+			Code:  http.StatusInternalServerError,
+		})
+	}
+	if member == nil {
+		return c.JSON(http.StatusNotFound, models.ErrorResponse{
+			Error:   "Member not found",
+			Code:    http.StatusNotFound,
+			Details: "No member found with the given ID",
+		})
+	}
+
+	result := map[string]string{
+		"member_id": id,
+	}
+
+	if vs, err := h.decryptField(member.VerificationStatusEncrypted); err == nil {
+		result["verification_status"] = vs
+	} else {
+		result["verification_status"] = ""
+	}
+	if dep, err := h.decryptField(member.DepositsEncrypted); err == nil {
+		result["deposits"] = dep
+	} else {
+		result["deposits"] = ""
+	}
+	if vn, err := h.decryptField(member.ViolationNotesEncrypted); err == nil {
+		result["violation_notes"] = vn
+	} else {
+		result["violation_notes"] = ""
+	}
+
+	h.repo.CreateAuditLog(&models.AuditLogEntry{
+		UserID:     userID,
+		Action:     "reveal_sensitive_fields",
+		EntityType: "member",
+		EntityID:   id,
+	})
+
+	logrus.WithFields(logrus.Fields{
+		"user_id":   userID,
+		"member_id": id,
+	}).Info("Sensitive member fields revealed by privileged user")
+
+	return c.JSON(http.StatusOK, result)
 }
 
 // UpdateMember updates an existing member (partial update of name/phone/tier_id).
