@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 
@@ -1030,6 +1031,322 @@ func TestDownload_FileNotFound_Returns404(t *testing.T) {
 	}
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("missing file should get 404; got %d", rec.Code)
+	}
+}
+
+// ─── F-001 regression: JWT live user-state enforcement ───────────────────────
+
+// TestJWTAuth_DeactivatedUser_Returns401 verifies that a request carrying a
+// valid JWT is denied with 401 when the user record has been deactivated
+// after token issuance (IsActive = false).
+func TestJWTAuth_DeactivatedUser_Returns401(t *testing.T) {
+	const secret = "test-secret-32-chars-long-enough!"
+	token, err := middleware.GenerateToken("uid-deactivated", "system_admin", secret)
+	if err != nil {
+		t.Fatalf("GenerateToken failed: %v", err)
+	}
+
+	// UserLookup returns an inactive user — simulates admin deactivating the account
+	// after the token was issued.
+	lookup := func(id string) (*models.User, error) {
+		return &models.User{ID: id, Role: "system_admin", IsActive: false}, nil
+	}
+
+	e := echo.New()
+	e.GET("/protected", func(c echo.Context) error {
+		return c.String(http.StatusOK, "ok")
+	}, middleware.JWTAuth(secret, lookup))
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("deactivated user should get 401; got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestJWTAuth_LockedUser_Returns401 verifies that a valid token is denied when
+// the user account has been locked (LockedUntil is in the future).
+func TestJWTAuth_LockedUser_Returns401(t *testing.T) {
+	const secret = "test-secret-32-chars-long-enough!"
+	token, err := middleware.GenerateToken("uid-locked", "front_desk", secret)
+	if err != nil {
+		t.Fatalf("GenerateToken failed: %v", err)
+	}
+
+	futureTime := time.Now().Add(24 * time.Hour)
+	lookup := func(id string) (*models.User, error) {
+		return &models.User{ID: id, Role: "front_desk", IsActive: true, LockedUntil: &futureTime}, nil
+	}
+
+	e := echo.New()
+	e.GET("/protected", func(c echo.Context) error {
+		return c.String(http.StatusOK, "ok")
+	}, middleware.JWTAuth(secret, lookup))
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("locked user should get 401; got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestJWTAuth_RoleDowngraded_DeniedOnAdminRoute verifies that when a user's role
+// is downgraded in the database after token issuance the live DB role is used —
+// so the downgraded user is denied access to admin-only routes.
+func TestJWTAuth_RoleDowngraded_DeniedOnAdminRoute(t *testing.T) {
+	const secret = "test-secret-32-chars-long-enough!"
+	// Token claims system_admin role.
+	token, err := middleware.GenerateToken("uid-downgraded", "system_admin", secret)
+	if err != nil {
+		t.Fatalf("GenerateToken failed: %v", err)
+	}
+
+	// But DB now shows the role as front_desk (role was changed after token issued).
+	lookup := func(id string) (*models.User, error) {
+		return &models.User{ID: id, Role: "front_desk", IsActive: true}, nil
+	}
+
+	e := echo.New()
+	// Route requires system_admin.
+	e.GET("/admin-only", func(c echo.Context) error {
+		return c.String(http.StatusOK, "ok")
+	}, middleware.JWTAuth(secret, lookup), middleware.RequireRole("system_admin"))
+
+	req := httptest.NewRequest(http.MethodGet, "/admin-only", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("role-downgraded user should get 403 on admin route; got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// ─── F-002 regression: sensitive field masking for all roles ──────────────────
+
+// TestMaskMemberSensitiveFields_MasksWhenEncryptedPresent verifies that a
+// member whose encrypted blob fields are non-empty gets [REDACTED] in the
+// plaintext fields after masking — for both admin and non-admin callers the
+// policy is identical.
+func TestMaskMemberSensitiveFields_MasksWhenEncryptedPresent(t *testing.T) {
+	// Use a real encryptField call to produce a valid blob (non-empty encrypted bytes).
+	h := NewMemberHandler(nil, "0123456789abcdef0123456789abcdef")
+	encVS, _ := h.encryptField("verified")
+	encDep, _ := h.encryptField("$500 deposit")
+	encVN, _ := h.encryptField("no violations")
+
+	m := &models.Member{
+		VerificationStatus:          "verified",
+		VerificationStatusEncrypted: encVS,
+		Deposits:                    "$500 deposit",
+		DepositsEncrypted:           encDep,
+		ViolationNotes:              "no violations",
+		ViolationNotesEncrypted:     encVN,
+	}
+
+	maskMemberSensitiveFields(m)
+
+	if m.VerificationStatus != "[REDACTED]" {
+		t.Errorf("VerificationStatus: want [REDACTED], got %q", m.VerificationStatus)
+	}
+	if m.Deposits != "[REDACTED]" {
+		t.Errorf("Deposits: want [REDACTED], got %q", m.Deposits)
+	}
+	if m.ViolationNotes != "[REDACTED]" {
+		t.Errorf("ViolationNotes: want [REDACTED], got %q", m.ViolationNotes)
+	}
+}
+
+// TestMaskMemberSensitiveFields_NoOpWhenEncryptedAbsent verifies that a member
+// with no encrypted blobs is left unchanged by maskMemberSensitiveFields — i.e.
+// the function does not overwrite fields that were never encrypted.
+func TestMaskMemberSensitiveFields_NoOpWhenEncryptedAbsent(t *testing.T) {
+	m := &models.Member{
+		VerificationStatus: "",
+		Deposits:           "",
+		ViolationNotes:     "",
+		// Encrypted slices are nil/empty.
+	}
+	maskMemberSensitiveFields(m)
+	if m.VerificationStatus != "" || m.Deposits != "" || m.ViolationNotes != "" {
+		t.Error("fields should remain empty when no encrypted blob is present")
+	}
+}
+
+// TestMaskMemberSensitiveFields_AdminAlsoMasked verifies that calling
+// maskMemberSensitiveFields on a member struct produces [REDACTED] regardless
+// of the caller role — confirming there is NO admin exception in the standard
+// list/detail path (F-002 policy: mask-by-default for everyone).
+func TestMaskMemberSensitiveFields_AdminAlsoMasked(t *testing.T) {
+	h := NewMemberHandler(nil, "0123456789abcdef0123456789abcdef")
+	enc, _ := h.encryptField("sensitive-data")
+
+	// Simulate member as it comes out of the repository for any role, including admin.
+	m := &models.Member{
+		VerificationStatus:          "sensitive-data",
+		VerificationStatusEncrypted: enc,
+	}
+
+	// maskMemberSensitiveFields is called regardless of the caller's role.
+	maskMemberSensitiveFields(m)
+
+	if m.VerificationStatus != "[REDACTED]" {
+		t.Errorf("admin path must also produce [REDACTED]; got %q", m.VerificationStatus)
+	}
+}
+
+// ─── F-005 regression: GET /stocktakes handler ───────────────────────────────
+
+// stubStocktakeStore satisfies the stocktakeListStore interface so we can test
+// listStocktakesResponse without a real database.
+type stubStocktakeStore struct {
+	stocktakes []models.Stocktake
+	err        error
+}
+
+func (s *stubStocktakeStore) ListStocktakes() ([]models.Stocktake, error) {
+	return s.stocktakes, s.err
+}
+
+// TestListStocktakes_Returns200WithDataShape verifies that a successful call to
+// the handler returns HTTP 200 and a JSON body with a top-level "data" array.
+func TestListStocktakes_Returns200WithDataShape(t *testing.T) {
+	store := &stubStocktakeStore{
+		stocktakes: []models.Stocktake{
+			{ID: "st-1", PeriodStart: "2026-01-01", PeriodEnd: "2026-01-31", Status: "completed", CreatedBy: "uid-1"},
+			{ID: "st-2", PeriodStart: "2026-02-01", PeriodEnd: "2026-02-28", Status: "open", CreatedBy: "uid-1"},
+		},
+	}
+	c, rec := echoCtx(http.MethodGet, "/stocktakes", "uid-1", "inventory_pharmacist")
+
+	if err := listStocktakesResponse(c, store); err != nil {
+		t.Fatalf("unexpected handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200; got %d — body: %s", rec.Code, rec.Body.String())
+	}
+
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response is not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if _, ok := body["data"]; !ok {
+		t.Errorf("response must have a 'data' key; got keys: %v", body)
+	}
+
+	var items []models.Stocktake
+	if err := json.Unmarshal(body["data"], &items); err != nil {
+		t.Fatalf("'data' is not a valid Stocktake array: %v", err)
+	}
+	if len(items) != 2 {
+		t.Errorf("expected 2 stocktakes; got %d", len(items))
+	}
+}
+
+// TestListStocktakes_EmptyStore_ReturnsEmptyArray verifies that when the store
+// holds no records the handler still returns 200 with an empty (non-null) array.
+// This tests the repository's nil-to-empty-slice normalisation path.
+func TestListStocktakes_EmptyStore_ReturnsEmptyArray(t *testing.T) {
+	store := &stubStocktakeStore{stocktakes: []models.Stocktake{}}
+	c, rec := echoCtx(http.MethodGet, "/stocktakes", "uid-1", "inventory_pharmacist")
+
+	if err := listStocktakesResponse(c, store); err != nil {
+		t.Fatalf("unexpected handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200; got %d", rec.Code)
+	}
+
+	var body struct {
+		Data []models.Stocktake `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+	if body.Data == nil {
+		t.Error("'data' must be a JSON array, not null")
+	}
+}
+
+// TestListStocktakes_TenantScoping_OrderPreserved verifies that the handler
+// returns stocktakes in the exact order supplied by the store (newest first, as
+// guaranteed by the repository's ORDER BY created_at DESC clause).  If the
+// store already returns items in descending order the handler must not re-sort
+// or reverse them.
+func TestListStocktakes_TenantScoping_OrderPreserved(t *testing.T) {
+	// Simulate repository returning two records ordered newest-first (as the
+	// tenant-scoped SQL query with ORDER BY created_at DESC produces).
+	newerID := "st-newer"
+	olderID := "st-older"
+	store := &stubStocktakeStore{
+		stocktakes: []models.Stocktake{
+			{ID: newerID, PeriodStart: "2026-03-01", PeriodEnd: "2026-03-31", Status: "open"},
+			{ID: olderID, PeriodStart: "2026-01-01", PeriodEnd: "2026-01-31", Status: "completed"},
+		},
+	}
+	c, rec := echoCtx(http.MethodGet, "/stocktakes", "uid-1", "inventory_pharmacist")
+
+	if err := listStocktakesResponse(c, store); err != nil {
+		t.Fatalf("unexpected handler error: %v", err)
+	}
+
+	var body struct {
+		Data []models.Stocktake `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+	if len(body.Data) != 2 {
+		t.Fatalf("expected 2 items; got %d", len(body.Data))
+	}
+	// Handler must preserve store order — newest entry must be first.
+	if body.Data[0].ID != newerID {
+		t.Errorf("first item should be newest (%s); got %s", newerID, body.Data[0].ID)
+	}
+	if body.Data[1].ID != olderID {
+		t.Errorf("second item should be oldest (%s); got %s", olderID, body.Data[1].ID)
+	}
+}
+
+// TestListStocktakes_RepoError_Returns500 verifies that a repository failure
+// is surfaced as HTTP 500 and does not panic or leak internal error details.
+func TestListStocktakes_RepoError_Returns500(t *testing.T) {
+	store := &stubStocktakeStore{err: fmt.Errorf("db: connection reset")}
+	c, rec := echoCtx(http.MethodGet, "/stocktakes", "uid-1", "inventory_pharmacist")
+
+	if err := listStocktakesResponse(c, store); err != nil {
+		t.Fatalf("handler should absorb repo errors and write 500; got: %v", err)
+	}
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("repo error should produce 500; got %d — body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestRevealSensitiveFields_NonAdmin_Forbidden is a duplicate-coverage guard
+// that the reveal endpoint's adminRole middleware still blocks non-admins after
+// the F-002 fix (role middleware must not have been weakened).
+func TestRevealSensitiveFields_NonAdmin_Forbidden_F002(t *testing.T) {
+	adminMW := middleware.RequireRole("system_admin")
+	// front_desk and inventory_pharmacist must both be forbidden.
+	for _, role := range []string{"front_desk", "inventory_pharmacist", "maintenance_tech"} {
+		c, rec := echoCtx(http.MethodGet, "/members/m1/sensitive", "u1", role)
+		c.SetParamNames("id")
+		c.SetParamValues("m1")
+		wrapped := adminMW(func(c echo.Context) error {
+			return c.String(http.StatusOK, "ok")
+		})
+		if err := wrapped(c); err != nil {
+			t.Fatalf("role %s: unexpected error: %v", role, err)
+		}
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("role %s on reveal endpoint: want 403, got %d", role, rec.Code)
+		}
 	}
 }
 

@@ -13,6 +13,12 @@ import (
 	"medops/internal/models"
 )
 
+// UserLookup is a function that retrieves a live user record by ID.
+// JWTAuth accepts an optional UserLookup to re-check active/lock state
+// on every request so deactivated or locked accounts are denied immediately
+// rather than waiting for the token to expire.
+type UserLookup func(id string) (*models.User, error)
+
 // Context keys for user info
 const (
 	contextKeyUserID   = "user_id"
@@ -44,7 +50,17 @@ func GenerateToken(userID, role, secret string) (string, error) {
 
 // JWTAuth returns middleware that validates a Bearer token from the Authorization header.
 // On success it sets "user_id" and "user_role" in the echo context.
-func JWTAuth(secret string) echo.MiddlewareFunc {
+//
+// An optional UserLookup may be provided. When present, every authenticated request
+// re-fetches the user record from the database and rejects the request if the account
+// has been deactivated or locked since the token was issued. The live role from the DB
+// is used (not the token claim) so role changes take effect immediately.
+func JWTAuth(secret string, lookupUser ...UserLookup) echo.MiddlewareFunc {
+	var lookup UserLookup
+	if len(lookupUser) > 0 {
+		lookup = lookupUser[0]
+	}
+
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			authHeader := c.Request().Header.Get("Authorization")
@@ -94,6 +110,36 @@ func JWTAuth(secret string) echo.MiddlewareFunc {
 					Error: "Token missing user_id claim",
 					Code:  http.StatusUnauthorized,
 				})
+			}
+
+			// Re-validate live user state when a lookup function is provided.
+			// This ensures deactivated/locked accounts are rejected immediately
+			// without waiting for the JWT to expire.
+			if lookup != nil {
+				user, lookupErr := lookup(userID)
+				if lookupErr != nil {
+					logrus.WithError(lookupErr).Warn("JWTAuth: user lookup failed")
+					return c.JSON(http.StatusUnauthorized, models.ErrorResponse{
+						Error: "Authentication check failed",
+						Code:  http.StatusUnauthorized,
+					})
+				}
+				if user == nil || !user.IsActive {
+					return c.JSON(http.StatusUnauthorized, models.ErrorResponse{
+						Error:   "Account deactivated",
+						Code:    http.StatusUnauthorized,
+						Details: "This account has been deactivated",
+					})
+				}
+				if user.LockedUntil != nil && user.LockedUntil.After(time.Now()) {
+					return c.JSON(http.StatusUnauthorized, models.ErrorResponse{
+						Error:   "Account locked",
+						Code:    http.StatusUnauthorized,
+						Details: "This account is temporarily locked",
+					})
+				}
+				// Use live role from DB so role changes take effect immediately.
+				role = user.Role
 			}
 
 			c.Set(contextKeyUserID, userID)

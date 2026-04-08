@@ -77,6 +77,7 @@ export const inventoryAPI = {
 
 // Stocktakes
 export const stocktakeAPI = {
+  list: () => api.get('/stocktakes'),
   create: (data: { period_start: string; period_end: string }) =>
     api.post('/stocktakes', data),
   get: (id: string) => api.get(`/stocktakes/${id}`),

@@ -533,3 +533,16 @@ func TestTenantArgIsConfiguredValue(t *testing.T) {
 		t.Errorf("GetStocktake must not pass previous repo's tenant %q", testTenantID)
 	}
 }
+
+// TestListStocktakes_TenantScoped verifies that ListStocktakes sends a SQL
+// query that:
+//  1. Contains the literal "tenant_id" — confirming the WHERE clause is present.
+//  2. Passes the repository's configured tenant ID as a bound argument — confirming
+//     the filter is parameterised and not hard-coded or omitted.
+func TestListStocktakes_TenantScoped(t *testing.T) {
+	repo, cap := newRepo(t)
+	// Return value is irrelevant; the capture driver returns no rows.
+	repo.ListStocktakes()
+	assertSQL(t, cap, "ListStocktakes", "tenant_id")
+	assertArg(t, cap, "ListStocktakes", testTenantID)
+}

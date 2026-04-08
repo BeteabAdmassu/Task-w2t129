@@ -64,7 +64,7 @@ export interface Stocktake {
   id: string;
   period_start: string;
   period_end: string;
-  status: 'draft' | 'in_progress' | 'completed';
+  status: 'open' | 'completed';
   created_by: string;
   created_at: string;
   lines?: StocktakeLine[];

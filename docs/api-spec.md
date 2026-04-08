@@ -62,14 +62,14 @@ Response includes:
 | GET | /users | Admin | List users | — | `{data[], pagination}` | 403 |
 | POST | /users | Admin | Create user | `{username, password, role}` | `{user}` | 400, 409 |
 | PUT | /users/:id | Admin | Update user | `{username?, role?, is_active?}` | `{user}` | 400, 404 |
-| DELETE | /users/:id | Admin | Deactivate | — | 204 | 404 |
-| POST | /users/:id/unlock | Admin | Unlock account | — | 204 | 404 |
+| DELETE | /users/:id | Admin | Deactivate | — | `{message}` | 404 |
+| POST | /users/:id/unlock | Admin | Unlock account | — | `{message}` | 404 |
 
 ### Inventory — SKUs
 
 | Method | Path | Auth | Description | Request Body | Response | Errors |
 |--------|------|------|-------------|-------------|----------|--------|
-| GET | /skus | Inventory | List/search SKUs | query: `?q=&ndc=&upc=` | `{data[], pagination}` | — |
+| GET | /skus | Inventory | List/search SKUs | query: `?search=` | `{data[], pagination}` | — |
 | POST | /skus | Inventory | Create SKU | `{ndc?, upc?, name, unit_of_measure, low_stock_threshold, storage_location}` | `{sku}` | 400, 409 |
 | GET | /skus/:id | Inventory | SKU detail + batches | — | `{sku, batches[]}` | 404 |
 | PUT | /skus/:id | Inventory | Update SKU | partial fields | `{sku}` | 400, 404 |
@@ -88,6 +88,7 @@ Response includes:
 
 | Method | Path | Auth | Description | Request Body | Response | Errors |
 |--------|------|------|-------------|-------------|----------|--------|
+| GET | /stocktakes | Inventory | List all stocktakes (newest first) | — | `{data[]}` | — |
 | POST | /stocktakes | Inventory | Start stocktake | `{period_start, period_end}` | `{stocktake}` | 400 |
 | GET | /stocktakes/:id | Inventory | Get with lines | — | `{stocktake, lines[]}` | 404 |
 | PUT | /stocktakes/:id/lines | Inventory | Submit counts | `{lines: [{sku_id, batch_id, counted_qty}]}` | `{lines[]}` | 400 |
@@ -123,9 +124,9 @@ Response includes:
 
 ### Sensitive-field masking policy
 
-`GET /members` and `GET /members/:id` return `[REDACTED]` for `verification_status`, `deposits`, and `violation_notes` for all callers except `system_admin`.
+`GET /members` and `GET /members/:id` return `[REDACTED]` for `verification_status`, `deposits`, and `violation_notes` for **all callers, including `system_admin`**. There is no role-based auto-decrypt on the standard list or detail endpoints.
 
-`system_admin` callers may call the dedicated reveal endpoint below; every call is audit-logged server-side.
+To obtain decrypted values, `system_admin` must call the dedicated reveal endpoint (`GET /members/:id/sensitive`). Every call to that endpoint is audit-logged server-side with the caller's `user_id` and the target `member_id`.
 
 ### Memberships
 
@@ -175,9 +176,9 @@ Response includes:
 | POST | /system/backup | Admin | Trigger backup | — | `{backup_id, status}` | 500 |
 | GET | /system/backup/status | Admin | Backup progress | — | `{status, last_backup_at}` | — |
 | POST | /system/update | Admin | Import update pkg (multipart `.zip` or `.sql`; falls back to pre-staged `DATA_DIR/updates/pending/` if no file uploaded). Package may include a `VERSION` file whose content becomes the version label. | multipart: `file` (optional) | `{version, status:"applied", migrations, applied_at}` | 400, 404 |
-| POST | /system/rollback | Admin | Restore DB from most-recent backup. **Note:** rolls back database state only; app-binary rollback requires manual intervention. | — | `{version, status:"rolled_back", restored_from, rolled_back_at}` | 400, 404, 500 |
+| POST | /system/rollback | Admin | Full version rollback: (1) restores application artifacts (backend binary + frontend assets) from the snapshot recorded by the preceding update, (2) restores the database from the pg_dump snapshot taken before that update, (3) writes a `restart.flag` sentinel so the Electron main process stops the running backend, starts it from the restored binary, and reloads the renderer. Falls back to DB-only restore when no artifact snapshot is recorded in version history. | — | `{version, status:"rolled_back", restored_from, rolled_back_at, artifacts_restored, restart_required}` | 400, 404, 500 |
 | GET | /system/config | Admin | Get config | — | `{config}` | — |
-| PUT | /system/config | Admin | Update config | `{key: value, ...}` | `{config}` | 400 |
+| PUT | /system/config | Admin | Update config | `{key, value}` | `{config}` | 400 |
 
 ### Drafts
 

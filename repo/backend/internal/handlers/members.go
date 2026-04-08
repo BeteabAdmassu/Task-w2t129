@@ -82,6 +82,22 @@ func (h *MemberHandler) decryptField(data []byte) (string, error) {
 	return string(plaintext), nil
 }
 
+// maskMemberSensitiveFields sets the plaintext representation of each encrypted
+// field to "[REDACTED]" so that the encrypted blob is never returned over the
+// standard list/detail endpoints.  Callers that need the decrypted values must
+// use the explicit GET /members/:id/sensitive endpoint (system_admin only).
+func maskMemberSensitiveFields(m *models.Member) {
+	if len(m.VerificationStatusEncrypted) > 0 {
+		m.VerificationStatus = "[REDACTED]"
+	}
+	if len(m.DepositsEncrypted) > 0 {
+		m.Deposits = "[REDACTED]"
+	}
+	if len(m.ViolationNotesEncrypted) > 0 {
+		m.ViolationNotes = "[REDACTED]"
+	}
+}
+
 // ListMembers returns a paginated list of members with optional search.
 func (h *MemberHandler) ListMembers(c echo.Context) error {
 	search := c.QueryParam("search")
@@ -103,34 +119,10 @@ func (h *MemberHandler) ListMembers(c echo.Context) error {
 		})
 	}
 
-	// Sensitive fields are masked by default; only system_admin receives decrypted values.
-	callerRole := middleware.GetUserRole(c)
-	isPrivileged := callerRole == "system_admin"
-	if isPrivileged {
-		logrus.WithField("user_id", middleware.GetUserID(c)).Info("Privileged sensitive-field reveal on member list")
-	}
+	// Sensitive fields are always masked on the list endpoint for all roles (F-002).
+	// Use the explicit GET /members/:id/sensitive endpoint to reveal them.
 	for i := range members {
-		if isPrivileged {
-			if vs, err := h.decryptField(members[i].VerificationStatusEncrypted); err == nil {
-				members[i].VerificationStatus = vs
-			}
-			if dep, err := h.decryptField(members[i].DepositsEncrypted); err == nil {
-				members[i].Deposits = dep
-			}
-			if vn, err := h.decryptField(members[i].ViolationNotesEncrypted); err == nil {
-				members[i].ViolationNotes = vn
-			}
-		} else {
-			if len(members[i].VerificationStatusEncrypted) > 0 {
-				members[i].VerificationStatus = "[REDACTED]"
-			}
-			if len(members[i].DepositsEncrypted) > 0 {
-				members[i].Deposits = "[REDACTED]"
-			}
-			if len(members[i].ViolationNotesEncrypted) > 0 {
-				members[i].ViolationNotes = "[REDACTED]"
-			}
-		}
+		maskMemberSensitiveFields(&members[i])
 	}
 
 	return c.JSON(http.StatusOK, models.PaginatedResponse{
@@ -288,33 +280,9 @@ func (h *MemberHandler) GetMember(c echo.Context) error {
 		})
 	}
 
-	// Sensitive fields are masked by default; only system_admin receives decrypted values.
-	callerRole := middleware.GetUserRole(c)
-	if callerRole == "system_admin" {
-		logrus.WithFields(logrus.Fields{
-			"user_id":   middleware.GetUserID(c),
-			"member_id": id,
-		}).Info("Privileged sensitive-field reveal on member get")
-		if vs, err := h.decryptField(member.VerificationStatusEncrypted); err == nil {
-			member.VerificationStatus = vs
-		}
-		if dep, err := h.decryptField(member.DepositsEncrypted); err == nil {
-			member.Deposits = dep
-		}
-		if vn, err := h.decryptField(member.ViolationNotesEncrypted); err == nil {
-			member.ViolationNotes = vn
-		}
-	} else {
-		if len(member.VerificationStatusEncrypted) > 0 {
-			member.VerificationStatus = "[REDACTED]"
-		}
-		if len(member.DepositsEncrypted) > 0 {
-			member.Deposits = "[REDACTED]"
-		}
-		if len(member.ViolationNotesEncrypted) > 0 {
-			member.ViolationNotes = "[REDACTED]"
-		}
-	}
+	// F-002: Sensitive fields are always masked in GetMember for all roles.
+	// Use GET /:id/sensitive (system_admin only) to retrieve decrypted values.
+	maskMemberSensitiveFields(member)
 
 	// Include session packages in the response so the frontend doesn't need a
 	// separate round-trip on the detail page.

@@ -64,11 +64,18 @@ const StocktakeCreateAndList: React.FC = () => {
     'stocktake_create', null, { period_start: periodStart, period_end: periodEnd },
   );
 
-  // List of recent stocktakes (we don't have a list endpoint in the API, so we'll show the create form prominently)
-  // We'll use a simple state to track recently created stocktakes
   const [recentStocktakes, setRecentStocktakes] = useState<Stocktake[]>([]);
-  const [listLoading, setListLoading] = useState(false);
+  const [listLoading, setListLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
+
+  useEffect(() => {
+    stocktakeAPI.list()
+      .then((res) => {
+        setRecentStocktakes(res.data?.data ?? []);
+      })
+      .catch(() => setListError('Failed to load stocktake history'))
+      .finally(() => setListLoading(false));
+  }, []);
 
   const validateCreate = (): boolean => {
     const errs: Record<string, string> = {};
@@ -88,16 +95,20 @@ const StocktakeCreateAndList: React.FC = () => {
     setCreateSuccess('');
     try {
       const res = await stocktakeAPI.create({ period_start: periodStart, period_end: periodEnd });
-      const newStocktake = res.data;
-      setCreateSuccess('Stocktake created successfully');
+      const newStocktake = res.data?.stocktake ?? res.data;
+      setCreateSuccess('Stocktake created — redirecting…');
       clearStocktakeDraft();
       setPeriodStart('');
       setPeriodEnd('');
       setCreateErrors({});
+      // Prepend to history list
+      if (newStocktake?.id) {
+        setRecentStocktakes((prev) => [newStocktake, ...prev]);
+      }
       // Navigate to the new stocktake
       setTimeout(() => {
-        navigate(`/stocktakes/${newStocktake.id || newStocktake.data?.id}`);
-      }, 1000);
+        navigate(`/stocktakes/${newStocktake?.id}`);
+      }, 800);
     } catch (err: any) {
       setCreateErrors({ _form: err.response?.data?.error || 'Failed to create stocktake' });
     } finally {
@@ -177,6 +188,54 @@ const StocktakeCreateAndList: React.FC = () => {
           <li>Review the auto-computed variances (counted - system)</li>
           <li>Complete the stocktake to finalize the count</li>
         </ol>
+      </div>
+
+      {/* History / list */}
+      <div style={cardStyle}>
+        <h3 style={{ margin: '0 0 1rem', fontSize: '1rem' }}>Stocktake History</h3>
+        {listLoading && <LoadingSpinner />}
+        {listError && <ErrorMessage message={listError} />}
+        {!listLoading && !listError && recentStocktakes.length === 0 && (
+          <EmptyState message="No stocktakes yet. Create one above." />
+        )}
+        {!listLoading && !listError && recentStocktakes.length > 0 && (
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
+            <thead>
+              <tr style={{ borderBottom: '2px solid #e0e0e0', textAlign: 'left' }}>
+                <th style={{ padding: '0.5rem 0.75rem' }}>Period</th>
+                <th style={{ padding: '0.5rem 0.75rem' }}>Status</th>
+                <th style={{ padding: '0.5rem 0.75rem' }}>Created</th>
+                <th style={{ padding: '0.5rem 0.75rem' }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {recentStocktakes.map((st) => (
+                <tr key={st.id} style={{ borderBottom: '1px solid #f0f0f0' }}>
+                  <td style={{ padding: '0.5rem 0.75rem' }}>{st.period_start} – {st.period_end}</td>
+                  <td style={{ padding: '0.5rem 0.75rem' }}>
+                    <span style={{
+                      padding: '0.2rem 0.5rem',
+                      borderRadius: 4,
+                      fontSize: '0.75rem',
+                      fontWeight: 600,
+                      backgroundColor: st.status === 'completed' ? '#e8f5e9' : st.status === 'open' ? '#e3f2fd' : '#fff3e0',
+                      color: st.status === 'completed' ? '#2e7d32' : st.status === 'open' ? '#1565c0' : '#e65100',
+                    }}>{st.status}</span>
+                  </td>
+                  <td style={{ padding: '0.5rem 0.75rem' }}>{new Date(st.created_at).toLocaleDateString()}</td>
+                  <td style={{ padding: '0.5rem 0.75rem' }}>
+                    <button
+                      onClick={() => navigate(`/stocktakes/${st.id}`)}
+                      style={{ ...btnPrimary, padding: '0.25rem 0.75rem', fontSize: '0.8rem' }}
+                    >
+                      Open
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );
@@ -262,7 +321,7 @@ const StocktakeDetail: React.FC<StocktakeDetailProps> = ({ id }) => {
   const isCompleted = stocktake.status === 'completed';
   const totalVariance = lines.reduce((sum, l) => sum + (l.counted_qty - l.system_qty), 0);
 
-  const statusColor = stocktake.status === 'completed' ? '#2e7d32' : stocktake.status === 'in_progress' ? '#e65100' : '#1565c0';
+  const statusColor = stocktake.status === 'completed' ? '#2e7d32' : '#1565c0';
 
   return (
     <div>

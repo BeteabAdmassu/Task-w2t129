@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+	log "github.com/sirupsen/logrus"
 
 	"medops/internal/models"
 )
@@ -468,6 +469,34 @@ func (r *Repository) ListStockTransactions(skuID string, page, pageSize int) ([]
 }
 
 // ---------- Stocktakes ----------
+
+// ListStocktakes returns all stocktakes for the current tenant, ordered newest first.
+func (r *Repository) ListStocktakes() ([]models.Stocktake, error) {
+	rows, err := r.DB.Query(
+		`SELECT id, period_start, period_end, status, created_by, created_at
+		 FROM stocktakes WHERE tenant_id = $1 ORDER BY created_at DESC`, r.tenantID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list stocktakes: %w", err)
+	}
+	defer rows.Close()
+
+	var stocktakes []models.Stocktake
+	for rows.Next() {
+		var st models.Stocktake
+		if err := rows.Scan(&st.ID, &st.PeriodStart, &st.PeriodEnd, &st.Status, &st.CreatedBy, &st.CreatedAt); err != nil {
+			return nil, fmt.Errorf("list stocktakes scan: %w", err)
+		}
+		stocktakes = append(stocktakes, st)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list stocktakes iterate: %w", err)
+	}
+	if stocktakes == nil {
+		stocktakes = []models.Stocktake{}
+	}
+	return stocktakes, nil
+}
 
 // CreateStocktake inserts a new stocktake record.
 func (r *Repository) CreateStocktake(st *models.Stocktake) error {
@@ -1535,6 +1564,7 @@ func (r *Repository) DeleteDraft(userID, formType, formID string) error {
 // ---------- Audit ----------
 
 // CreateAuditLog inserts a new audit log entry.
+// F-003: always logs a structured warning on failure so audit gaps are never silent.
 func (r *Repository) CreateAuditLog(entry *models.AuditLogEntry) error {
 	entry.CreatedAt = time.Now()
 	_, err := r.DB.Exec(
@@ -1543,7 +1573,13 @@ func (r *Repository) CreateAuditLog(entry *models.AuditLogEntry) error {
 		entry.UserID, entry.Action, entry.EntityType, entry.EntityID, entry.Details, entry.CreatedAt,
 	)
 	if err != nil {
-		return fmt.Errorf("create audit log: %w", err)
+		wrapped := fmt.Errorf("create audit log: %w", err)
+		log.WithError(wrapped).WithFields(log.Fields{
+			"action":      entry.Action,
+			"entity_type": entry.EntityType,
+			"entity_id":   entry.EntityID,
+		}).Warn("Audit log insert failed — compliance gap")
+		return wrapped
 	}
 	return nil
 }

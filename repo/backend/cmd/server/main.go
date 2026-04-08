@@ -121,8 +121,9 @@ func main() {
 	fileHandler := handlers.NewFileHandler(repo, cfg.DataDir)
 	systemHandler := handlers.NewSystemHandler(repo, cfg.DataDir, cfg.DatabaseURL)
 
-	// Auth middleware
-	authMW := middleware.JWTAuth(cfg.JWTSecret)
+	// Auth middleware — passes repo.GetUserByID so every request re-checks
+	// active/lock status; deactivated accounts are denied immediately (F-001).
+	authMW := middleware.JWTAuth(cfg.JWTSecret, repo.GetUserByID)
 	adminRole := middleware.RequireRole("system_admin")
 	inventoryRole := middleware.RequireRole("system_admin", "inventory_pharmacist")
 	learningRole := middleware.RequireRole("system_admin", "learning_coordinator")
@@ -167,6 +168,7 @@ func main() {
 
 	// Stocktakes (inventory role)
 	st := api.Group("/stocktakes", authMW, inventoryRole)
+	st.GET("", inventoryHandler.ListStocktakes)
 	st.POST("", inventoryHandler.CreateStocktake)
 	st.GET("/:id", inventoryHandler.GetStocktake)
 	st.PUT("/:id/lines", inventoryHandler.UpdateStocktakeLines)

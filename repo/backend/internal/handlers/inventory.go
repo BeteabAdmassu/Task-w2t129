@@ -707,6 +707,34 @@ func (h *InventoryHandler) Adjust(c echo.Context) error {
 	})
 }
 
+// stocktakeListStore is the minimal repository interface required by
+// listStocktakesResponse.  *repository.Repository satisfies it; tests may
+// inject a lightweight stub without needing a real database.
+type stocktakeListStore interface {
+	ListStocktakes() ([]models.Stocktake, error)
+}
+
+// listStocktakesResponse is the pure handler logic for GET /stocktakes,
+// extracted so it can be unit-tested via the stocktakeListStore interface.
+func listStocktakesResponse(c echo.Context, store stocktakeListStore) error {
+	stocktakes, err := store.ListStocktakes()
+	if err != nil {
+		logrus.WithError(err).Error("Failed to list stocktakes")
+		return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error: "Failed to retrieve stocktakes",
+			Code:  http.StatusInternalServerError,
+		})
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"data": stocktakes,
+	})
+}
+
+// ListStocktakes returns all stocktakes for the tenant, newest first.
+func (h *InventoryHandler) ListStocktakes(c echo.Context) error {
+	return listStocktakesResponse(c, h.repo)
+}
+
 // CreateStocktake creates a new stocktake with period dates.
 func (h *InventoryHandler) CreateStocktake(c echo.Context) error {
 	var req struct {

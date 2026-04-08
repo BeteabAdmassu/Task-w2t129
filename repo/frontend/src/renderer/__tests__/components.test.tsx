@@ -48,6 +48,8 @@ const mockMembersTransactions = vi.hoisted(() =>
   vi.fn().mockResolvedValue({ data: { data: [], total: 0 } })
 );
 const mockMembersCreatePackage = vi.hoisted(() => vi.fn());
+const mockStocktakeList = vi.hoisted(() => vi.fn());
+const mockStocktakeCreate = vi.hoisted(() => vi.fn());
 
 vi.mock('../services/api', () => ({
   // Default export: the raw axios instance used directly by DraftRecoveryDialog.
@@ -102,12 +104,20 @@ vi.mock('../services/api', () => ({
     searchKnowledgePoints: vi.fn().mockResolvedValue({ data: { data: [], total: 0 } }),
     exportContent: mockLearningExport,
   },
+  stocktakeAPI: {
+    list: mockStocktakeList,
+    create: mockStocktakeCreate,
+    get: vi.fn(),
+    updateLines: vi.fn(),
+    complete: vi.fn(),
+  },
 }));
 
 // ─── Import pages AFTER mocks are in place ────────────────────────────────────
 
 import LoginPage from '../components/admin/LoginPage';
 import DashboardPage from '../components/admin/DashboardPage';
+import StocktakePage from '../components/inventory/StocktakePage';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -783,5 +793,95 @@ describe('MemberDetailPage — session package create flow', () => {
     const activeBadges = screen.getAllByText('active');
     expect(activeBadges.length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('depleted')).toBeTruthy();
+  });
+});
+
+// ─── F-005 regression: stocktake list/history UI ─────────────────────────────
+
+function renderStocktakePage(initialPath = '/stocktakes') {
+  return render(
+    <MemoryRouter initialEntries={[initialPath]}>
+      <Routes>
+        <Route path="/stocktakes" element={<StocktakePage />} />
+        <Route path="/stocktakes/:id" element={<div data-testid="stocktake-detail">Detail</div>} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
+describe('StocktakePage — history list (F-005)', () => {
+  beforeEach(() => {
+    mockStocktakeList.mockReset();
+    mockStocktakeCreate.mockReset();
+  });
+
+  it('calls stocktakeAPI.list on mount to load history', async () => {
+    mockStocktakeList.mockResolvedValueOnce({ data: { data: [] } });
+    renderStocktakePage();
+    await waitFor(() => {
+      expect(mockStocktakeList).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('renders history rows for each returned stocktake', async () => {
+    mockStocktakeList.mockResolvedValueOnce({
+      data: {
+        data: [
+          { id: 'st-001', period_start: '2026-01-01', period_end: '2026-01-31', status: 'completed', created_by: 'u1', created_at: '2026-01-31T10:00:00Z' },
+          { id: 'st-002', period_start: '2026-02-01', period_end: '2026-02-28', status: 'open', created_by: 'u1', created_at: '2026-02-28T10:00:00Z' },
+        ],
+      },
+    });
+    renderStocktakePage();
+    await waitFor(() => {
+      expect(screen.getByText('completed')).toBeTruthy();
+      expect(screen.getByText('open')).toBeTruthy();
+    });
+    // Period range text
+    expect(screen.getByText(/2026-01-01.*2026-01-31/)).toBeTruthy();
+    expect(screen.getByText(/2026-02-01.*2026-02-28/)).toBeTruthy();
+  });
+
+  it('renders empty state when no stocktakes exist', async () => {
+    mockStocktakeList.mockResolvedValueOnce({ data: { data: [] } });
+    renderStocktakePage();
+    await waitFor(() => {
+      expect(screen.getByText(/no stocktakes yet/i)).toBeTruthy();
+    });
+  });
+
+  it('renders error state when list API fails', async () => {
+    mockStocktakeList.mockRejectedValueOnce(new Error('network error'));
+    renderStocktakePage();
+    await waitFor(() => {
+      expect(screen.getByText(/failed to load stocktake history/i)).toBeTruthy();
+    });
+  });
+
+  it('clicking Open navigates to /stocktakes/:id', async () => {
+    mockStocktakeList.mockResolvedValueOnce({
+      data: {
+        data: [
+          { id: 'st-nav-01', period_start: '2026-03-01', period_end: '2026-03-31', status: 'open', created_by: 'u1', created_at: '2026-03-31T10:00:00Z' },
+        ],
+      },
+    });
+    renderStocktakePage();
+    await waitFor(() => screen.getByText('open'));
+    // Click the Open button
+    const openBtn = screen.getByRole('button', { name: /open/i });
+    fireEvent.click(openBtn);
+    // Should navigate to the detail route
+    await waitFor(() => {
+      expect(screen.getByTestId('stocktake-detail')).toBeTruthy();
+    });
+  });
+
+  it('shows the Stocktake History heading', async () => {
+    mockStocktakeList.mockResolvedValueOnce({ data: { data: [] } });
+    renderStocktakePage();
+    await waitFor(() => {
+      expect(screen.getByText(/stocktake history/i)).toBeTruthy();
+    });
   });
 });
