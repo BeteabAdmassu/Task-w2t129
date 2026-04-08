@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { skusAPI, inventoryAPI } from '../../services/api';
 import { useFetch } from '../../hooks/useFetch';
 import { useAuth } from '../../hooks/useAuth';
-import type { SKU, PaginatedResponse } from '../../types';
+import type { SKU, InventoryBatch, PaginatedResponse } from '../../types';
 import LoadingSpinner from '../common/LoadingSpinner';
 import ErrorMessage from '../common/ErrorMessage';
 import EmptyState from '../common/EmptyState';
@@ -124,7 +124,41 @@ const SKUListPage: React.FC = () => {
     setOpError(null);
     setOpSuccess(null);
     try {
-      await inventoryAPI.adjust({ sku_id: sku.id, quantity: qty, reason_code: 'manual_adjustment' });
+      // Fetch batches to resolve batch_id automatically using FEFO selection.
+      const batchRes = await skusAPI.getBatches(sku.id);
+      const allBatches: InventoryBatch[] = Array.isArray(batchRes.data)
+        ? batchRes.data
+        : (batchRes.data as any)?.data ?? [];
+
+      const now = new Date();
+      const nonExpired = allBatches.filter(b => new Date(b.expiration_date) > now);
+      if (nonExpired.length === 0) {
+        setOpError('No non-expired batches available for adjustment');
+        return;
+      }
+
+      // FEFO: sort by expiration ascending — earliest-expiry first.
+      nonExpired.sort((a, b) =>
+        new Date(a.expiration_date).getTime() - new Date(b.expiration_date).getTime()
+      );
+
+      let selected = nonExpired[0];
+      if (qty < 0) {
+        // Deduction: pick earliest-expiry batch that has enough stock.
+        const suitable = nonExpired.find(b => b.quantity_on_hand + qty >= 0);
+        if (!suitable) {
+          setOpError('Insufficient stock in any single batch for this deduction');
+          return;
+        }
+        selected = suitable;
+      }
+
+      await inventoryAPI.adjust({
+        sku_id: sku.id,
+        batch_id: selected.id,
+        quantity: qty,
+        reason_code: 'manual_adjustment',
+      });
       setOpSuccess(`Adjusted "${sku.name}" by ${qty > 0 ? '+' : ''}${qty}`);
       refetch();
       setTimeout(() => setOpSuccess(null), 3000);

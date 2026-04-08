@@ -195,8 +195,17 @@ All API endpoints are served at `http://localhost:8080/api/v1/`.
 - `POST /members/:id/add-value` — Add points/stored value
 
 ### System
-- `GET /health` — Health check
-- `POST /system/backup` — Trigger backup
+- `GET /health` — Health check (returns `status`, `version`, `uptime`, `timestamp`)
+- `POST /system/backup` — Trigger database backup (pg_dump to DATA_DIR/backups/)
+- `GET /system/backup/status` — Last backup file info
+- `POST /system/update` — Import offline update package (.zip or .sql); installs SQL migrations and optional backend/frontend artifacts; returns `version`, `status`, `migrations`, `restart_required`
+- `POST /system/rollback` — Roll back to the previous installed version: restores database from pre-update pg_dump snapshot **and** restores backend binary + frontend assets from artifact snapshot; writes a restart flag so Electron automatically stops/starts the backend subprocess; returns `version`, `status`, `artifacts_restored`, `restart_required`, `rolled_back_at`
+- `GET /system/config` — Get system configuration key-value pairs
+- `PUT /system/config` — Update a single config key (`{ key, value }`)
+- `POST /system/drafts/:formType` — Save a form draft checkpoint
+- `GET /system/drafts` — List all drafts for the authenticated user
+- `GET /system/drafts/:formType/:formId` — Get a specific draft
+- `DELETE /system/drafts/:formType/:formId` — Delete a specific draft
 
 ## Desktop (Electron) Build
 
@@ -247,10 +256,10 @@ npm run electron:dev
 - **Multi-window**: open additional workspace windows via tray menu or `Ctrl+N`
 - **Keyboard shortcuts**:
   - `Ctrl+K` — command palette (navigate to any section)
-  - `Ctrl+N` — open new window / navigate to list
-  - `Ctrl+Enter` — submit active form
-  - `F2` — focus first input on page
-  - `Alt+D/U/S/K/L/M/W/R/T` — jump to section
+  - `Ctrl+N` — dispatch `medops:create-new` event → opens the create modal on the active page
+  - `Ctrl+Enter` — submit the currently focused form
+  - `F2` — dispatch `medops:edit-row` event → opens the edit modal for the first row on the active page (UsersPage opens the Edit Role modal; other pages implement their own listener)
+  - `Alt+D/U/S/K/L/M/W/R/T/Y` — jump to Dashboard / Users / SKUs / Stocktakes / Learning / Members / Work Orders / Rate Tables / Statements / System Config
   - `Ctrl+L` (tray) — lock all windows
 - **Offline operation**: backend runs locally, no internet required
 - **Single-instance**: second launch focuses the existing window
@@ -263,6 +272,40 @@ npm run electron:dev
 | `frontend/dist-installer/MedOps Console *.msi` | MSI for enterprise deployment (Group Policy) |
 
 PostgreSQL is bundled automatically via embedded-postgres — no separate installation is required.
+
+### Offline updates and version rollback
+
+Update packages are `.zip` archives distributed on a USB drive or shared network share — no internet required.
+
+**Update package layout:**
+
+```
+update-v1.2.0.zip
+├── migrations/
+│   └── 000010_add_column.sql   # SQL migrations applied in lexicographic order
+├── backend/
+│   └── medops-server.exe       # (optional) new backend binary
+├── frontend/
+│   ├── index.html              # (optional) new frontend SPA bundle
+│   └── assets/
+└── version.txt                 # e.g. "1.2.0"
+```
+
+**Apply an update** (System Config → Apply Offline Update):
+1. Before any changes: a `pg_dump` snapshot of the current database is written to `DATA_DIR/backups/` and the current `DATA_DIR/active/` artifacts (binary + frontend) are snapshotted to `DATA_DIR/versions/<timestamp>/`.
+2. SQL migrations are applied in lexicographic order.
+3. Backend binary and frontend assets (if included) are written to `DATA_DIR/active/`.
+4. Version history is appended to `DATA_DIR/updates/version_history.json`.
+5. The backend subprocess is restarted via Electron IPC; renderer windows reload from the new frontend assets.
+
+**One-click rollback** (System Config → Rollback to Previous Version):
+1. The most recent `version_history.json` entry is read to identify the pre-update snapshots.
+2. The database is restored from the pg_dump snapshot using `psql --single-transaction`.
+3. The backend binary and frontend assets are restored from `DATA_DIR/versions/<timestamp>/`.
+4. A `restart.flag` sentinel file is written; Electron's polling watcher detects it, stops the backend subprocess, starts it from the restored binary, and reloads renderer windows.
+5. The history entry is popped; repeated rollbacks chain back to baseline.
+
+All update and rollback operations are audit-logged with user ID and timestamp.
 
 ## Security & Tenant Isolation Model
 

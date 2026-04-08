@@ -51,6 +51,14 @@ contextBridge.exposeInMainWorld('electron', {
     detail?: string;
   }) => ipcRenderer.send('dialog:showMessage', opts),
 
+  /**
+   * Restart the backend subprocess and reload all renderer windows.
+   * Called by SystemConfigPage after a successful version rollback or update
+   * so the new binary and frontend assets take effect immediately.
+   * No-op in web/Docker mode (IPC not available outside Electron).
+   */
+  restartBackend: (): Promise<void> => ipcRenderer.invoke('system:restart-backend'),
+
   /** Platform string for conditional UI */
   platform: process.platform,
 });
@@ -72,6 +80,7 @@ declare global {
         message: string;
         detail?: string;
       }): void;
+      restartBackend(): Promise<void>;
       platform: string;
     };
     __ELECTRON__: boolean;

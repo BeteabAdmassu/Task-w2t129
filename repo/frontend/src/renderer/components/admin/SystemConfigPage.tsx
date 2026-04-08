@@ -78,8 +78,35 @@ const SystemConfigPage: React.FC = () => {
     setRollbackBusy(true);
     setActionStatus(null);
     try {
-      await systemAPI.rollback();
-      setActionStatus({ type: 'success', message: 'Rollback completed. The system has been restored to the previous state.' });
+      const res = await systemAPI.rollback();
+      const { version, artifacts_restored, restart_required } = res.data as {
+        version: string;
+        artifacts_restored: boolean;
+        restart_required: boolean;
+      };
+
+      let message = `Version rollback completed. System restored to version "${version}".`;
+      if (artifacts_restored) {
+        message += ' Application binaries and frontend assets have been restored.';
+      }
+      if (restart_required) {
+        message += ' Restarting backend…';
+      }
+      setActionStatus({ type: 'success', message });
+
+      // Trigger backend restart via Electron IPC so the restored binary and
+      // frontend assets take effect immediately without requiring a manual relaunch.
+      if (restart_required && typeof window !== 'undefined' && (window as any).electron?.restartBackend) {
+        try {
+          await (window as any).electron.restartBackend();
+          setActionStatus({
+            type: 'success',
+            message: `Version rollback complete. Restored to "${version}". Application restarted successfully.`,
+          });
+        } catch {
+          // Restart flag polling will handle it; non-fatal here.
+        }
+      }
     } catch (err: any) {
       setActionStatus({ type: 'error', message: err.response?.data?.error || 'Rollback failed.' });
     } finally {
@@ -92,10 +119,33 @@ const SystemConfigPage: React.FC = () => {
     setActionStatus(null);
     try {
       const res = await systemAPI.applyUpdate(updateFile ?? undefined);
-      const { version, status } = res.data as { version: string; status: string };
-      setActionStatus({ type: 'success', message: `Update applied: version ${version} (${status}).` });
+      const { version, status, restart_required } = res.data as {
+        version: string;
+        status: string;
+        restart_required?: boolean;
+      };
+
+      let message = `Update applied: version ${version} (${status}).`;
+      if (restart_required) {
+        message += ' Restarting backend to activate new binaries…';
+      }
+      setActionStatus({ type: 'success', message });
       setUpdateFile(null);
       if (updateInputRef.current) updateInputRef.current.value = '';
+
+      // Trigger backend restart via Electron IPC so new binaries and frontend
+      // assets installed by the update package take effect immediately.
+      if (restart_required && typeof window !== 'undefined' && (window as any).electron?.restartBackend) {
+        try {
+          await (window as any).electron.restartBackend();
+          setActionStatus({
+            type: 'success',
+            message: `Update applied: version ${version}. Application restarted successfully.`,
+          });
+        } catch {
+          // Restart flag polling will handle it; non-fatal here.
+        }
+      }
     } catch (err: any) {
       setActionStatus({ type: 'error', message: err.response?.data?.error || 'Update failed.' });
     } finally {
@@ -206,7 +256,7 @@ const SystemConfigPage: React.FC = () => {
               fontSize: '0.875rem',
             }}
           >
-            {rollbackBusy ? 'Rolling Back…' : 'Rollback System'}
+            {rollbackBusy ? 'Rolling Back…' : 'Rollback to Previous Version'}
           </button>
         </div>
       </div>
@@ -215,7 +265,9 @@ const SystemConfigPage: React.FC = () => {
       <div style={cardStyle}>
         <h2 style={{ margin: '0 0 0.5rem', fontSize: '1rem', color: '#333' }}>Apply Offline Update</h2>
         <p style={{ margin: '0 0 1rem', fontSize: '0.85rem', color: '#666' }}>
-          Import an update package (.zip or .sql) distributed offline. Migrations run automatically.
+          Import an update package (.zip or .sql) distributed offline. SQL migrations run automatically.
+          A .zip package may also include updated backend binaries (<code>backend/</code>) and frontend
+          assets (<code>frontend/</code>) which are installed and activated on restart.
           Leave the file picker empty to apply a pre-staged package from the server data directory.
         </p>
         <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
@@ -253,14 +305,21 @@ const SystemConfigPage: React.FC = () => {
         }}>
           <div style={{
             backgroundColor: '#fff', borderRadius: 8, padding: '2rem',
-            maxWidth: 440, width: '90%', boxShadow: '0 4px 24px rgba(0,0,0,0.2)',
+            maxWidth: 480, width: '90%', boxShadow: '0 4px 24px rgba(0,0,0,0.2)',
           }}>
             <h3 style={{ margin: '0 0 0.75rem', color: '#b71c1c', fontSize: '1.1rem' }}>
-              Confirm System Rollback
+              Confirm Version Rollback
             </h3>
-            <p style={{ margin: '0 0 1.5rem', fontSize: '0.9rem', color: '#555', lineHeight: 1.5 }}>
-              This will restore the system to its previous state. All changes made since the last
-              backup will be lost. This action cannot be undone. Are you sure you want to proceed?
+            <p style={{ margin: '0 0 1rem', fontSize: '0.9rem', color: '#555', lineHeight: 1.5 }}>
+              This will restore the system to the <strong>previous installed version</strong>:
+            </p>
+            <ul style={{ margin: '0 0 1rem', paddingLeft: '1.5rem', fontSize: '0.9rem', color: '#555', lineHeight: 1.8 }}>
+              <li>The <strong>database</strong> is restored from the snapshot taken immediately before the last update.</li>
+              <li>The <strong>backend binary</strong> and <strong>frontend assets</strong> are restored from the artifact snapshot of the previous version.</li>
+              <li>The backend will <strong>automatically restart</strong> once the restore completes.</li>
+            </ul>
+            <p style={{ margin: '0 0 1.5rem', fontSize: '0.85rem', color: '#b71c1c', lineHeight: 1.5 }}>
+              All data changes made since the last update will be reverted. This action cannot be undone.
             </p>
             <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
               <button
@@ -281,7 +340,7 @@ const SystemConfigPage: React.FC = () => {
                   cursor: 'pointer', fontWeight: 500, fontSize: '0.875rem',
                 }}
               >
-                Yes, Rollback
+                Yes, Rollback to Previous Version
               </button>
             </div>
           </div>

@@ -89,13 +89,10 @@ const Layout: React.FC<Props> = ({ children }) => {
         return;
       }
 
-      // F2 — focus the first input on the page
+      // F2 — signal the active page to enter edit-row mode for the current/first row.
       if (e.key === 'F2') {
-        const firstInput = document.querySelector<HTMLInputElement>('main input:not([type=hidden]), main textarea, main select');
-        if (firstInput) {
-          e.preventDefault();
-          firstInput.focus();
-        }
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('medops:edit-row'));
         return;
       }
 

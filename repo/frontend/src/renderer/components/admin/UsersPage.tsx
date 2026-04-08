@@ -31,6 +31,18 @@ const UsersPage: React.FC = () => {
     return () => window.removeEventListener('medops:create-new', handler);
   }, []);
 
+  // F2 shortcut: open edit-role modal for the first user in the list
+  useEffect(() => {
+    const handler = () => {
+      if (users.length > 0) {
+        setEditUser(users[0]);
+        setEditRole(users[0].role);
+      }
+    };
+    window.addEventListener('medops:edit-row', handler);
+    return () => window.removeEventListener('medops:edit-row', handler);
+  }, [users]);
+
   // Create modal
   const [showCreate, setShowCreate] = useState(false);
   const [createForm, setCreateForm] = useState({ username: '', password: '', role: ROLES[0] });

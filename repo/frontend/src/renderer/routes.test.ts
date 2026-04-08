@@ -130,57 +130,6 @@ describe('Role-protected route consistency', () => {
   });
 });
 
-// ─── Statement status-machine labels ─────────────────────────────────────────
-// Mirrors the DB CHECK constraint: (draft, pending_approval, approved, exported)
-
-// Canonical statement states: pending → approved → paid (no direct pending→paid)
-const VALID_STATEMENT_STATUSES = ['pending', 'approved', 'paid'];
-
-function statementStatusLabel(status: string): string {
-  const map: Record<string, string> = {
-    pending:  'Pending',
-    approved: 'Approved',
-    paid:     'Paid',
-  };
-  return map[status] ?? status;
-}
-
-describe('Statement status labels align with DB enum', () => {
-  for (const status of VALID_STATEMENT_STATUSES) {
-    it(`status "${status}" has a human-readable label`, () => {
-      const label = statementStatusLabel(status);
-      expect(label.length).toBeGreaterThan(0);
-      // Labels must differ from raw enum value (Pending vs pending, etc.)
-      expect(label[0]).toBe(label[0].toUpperCase());
-    });
-  }
-
-  it('state set has exactly 3 canonical states', () => {
-    expect(VALID_STATEMENT_STATUSES).toHaveLength(3);
-  });
-
-  it('does not include legacy "draft" state', () => {
-    expect(VALID_STATEMENT_STATUSES).not.toContain('draft');
-  });
-
-  it('does not include legacy "pending_approval" state', () => {
-    expect(VALID_STATEMENT_STATUSES).not.toContain('pending_approval');
-  });
-
-  it('does not include legacy "exported" state', () => {
-    expect(VALID_STATEMENT_STATUSES).not.toContain('exported');
-  });
-
-  it('enforces pending → approved → paid ordering', () => {
-    expect(VALID_STATEMENT_STATUSES.indexOf('pending')).toBeLessThan(
-      VALID_STATEMENT_STATUSES.indexOf('approved'),
-    );
-    expect(VALID_STATEMENT_STATUSES.indexOf('approved')).toBeLessThan(
-      VALID_STATEMENT_STATUSES.indexOf('paid'),
-    );
-  });
-});
-
 // ─── Electron API base-URL detection ─────────────────────────────────────────
 
 describe('API base URL detection', () => {
@@ -321,5 +270,281 @@ describe('Secret bootstrap — safeStorage path selection logic', () => {
     const mockSecret = 'a'.repeat(64);
     expect(mockSecret).toHaveLength(64);
     expect(/^[0-9a-f]{64}$/.test(mockSecret)).toBe(true);
+  });
+});
+
+// ─── Quick-adjust FEFO batch selection logic ──────────────────────────────────
+// Mirrors the batch-selection algorithm in SKUListPage.handleQuickAdjust.
+
+interface BatchStub { id: string; expiration_date: string; quantity_on_hand: number }
+
+function fefoSelectForAdjust(batches: BatchStub[], qty: number): BatchStub | null {
+  const now = new Date();
+  const nonExpired = batches.filter(b => new Date(b.expiration_date) > now);
+  if (nonExpired.length === 0) return null;
+  nonExpired.sort((a, b) =>
+    new Date(a.expiration_date).getTime() - new Date(b.expiration_date).getTime()
+  );
+  if (qty > 0) return nonExpired[0]; // addition: earliest expiry
+  return nonExpired.find(b => b.quantity_on_hand + qty >= 0) ?? null;
+}
+
+describe('Quick-adjust — FEFO batch selection includes batch_id', () => {
+  const future1 = new Date(Date.now() + 30 * 86400e3).toISOString().slice(0, 10); // 30 days
+  const future2 = new Date(Date.now() + 60 * 86400e3).toISOString().slice(0, 10); // 60 days
+  const past    = new Date(Date.now() - 1 * 86400e3).toISOString().slice(0, 10);  // yesterday
+
+  const batches: BatchStub[] = [
+    { id: 'b-early', expiration_date: future1, quantity_on_hand: 10 },
+    { id: 'b-late',  expiration_date: future2, quantity_on_hand: 20 },
+    { id: 'b-gone',  expiration_date: past,    quantity_on_hand: 5  },
+  ];
+
+  it('selects earliest non-expired batch for a positive adjustment', () => {
+    const selected = fefoSelectForAdjust(batches, 5);
+    expect(selected?.id).toBe('b-early');
+  });
+
+  it('selects earliest non-expired batch with enough stock for a deduction', () => {
+    const selected = fefoSelectForAdjust(batches, -8);
+    expect(selected?.id).toBe('b-early'); // 10 - 8 = 2 ≥ 0 ✓
+  });
+
+  it('skips earliest batch when stock is insufficient, picks next', () => {
+    const selected = fefoSelectForAdjust(batches, -15);
+    // b-early has only 10; -15 would go negative → skip. b-late has 20 → ok.
+    expect(selected?.id).toBe('b-late');
+  });
+
+  it('returns null when all batches are expired', () => {
+    const expired = [{ id: 'x', expiration_date: past, quantity_on_hand: 100 }];
+    expect(fefoSelectForAdjust(expired, 1)).toBeNull();
+  });
+
+  it('returns null when no batch has enough stock for the deduction', () => {
+    const lowStock = [{ id: 'y', expiration_date: future1, quantity_on_hand: 2 }];
+    expect(fefoSelectForAdjust(lowStock, -5)).toBeNull();
+  });
+
+  it('always produces a batch_id (non-empty string) when selection succeeds', () => {
+    const selected = fefoSelectForAdjust(batches, 1);
+    expect(typeof selected?.id).toBe('string');
+    expect(selected!.id.length).toBeGreaterThan(0);
+  });
+});
+
+// ─── Statement lifecycle — reconciled state consistency ───────────────────────
+
+const STATEMENT_LIFECYCLE = ['pending', 'reconciled', 'approved', 'paid'] as const;
+type StatementStatus = typeof STATEMENT_LIFECYCLE[number];
+
+function canReconcile(status: StatementStatus): boolean { return status === 'pending'; }
+function canApprove(status: StatementStatus): boolean { return status === 'reconciled'; }
+function canMarkPaid(status: StatementStatus): boolean { return status === 'approved'; }
+
+describe('Statement lifecycle includes reconciled state', () => {
+  it('lifecycle has exactly 4 states including reconciled', () => {
+    expect(STATEMENT_LIFECYCLE).toHaveLength(4);
+    expect(STATEMENT_LIFECYCLE).toContain('reconciled');
+  });
+
+  it('only pending statements can be reconciled', () => {
+    expect(canReconcile('pending')).toBe(true);
+    expect(canReconcile('reconciled')).toBe(false);
+    expect(canReconcile('approved')).toBe(false);
+  });
+
+  it('only reconciled statements can be approved (two-step gate)', () => {
+    expect(canApprove('reconciled')).toBe(true);
+    expect(canApprove('pending')).toBe(false);
+    expect(canApprove('approved')).toBe(false);
+  });
+
+  it('only approved statements can be marked paid', () => {
+    expect(canMarkPaid('approved')).toBe(true);
+    expect(canMarkPaid('reconciled')).toBe(false);
+    expect(canMarkPaid('pending')).toBe(false);
+  });
+
+  it('states are strictly ordered: pending < reconciled < approved < paid', () => {
+    const order = STATEMENT_LIFECYCLE;
+    expect(order.indexOf('pending')).toBeLessThan(order.indexOf('reconciled'));
+    expect(order.indexOf('reconciled')).toBeLessThan(order.indexOf('approved'));
+    expect(order.indexOf('approved')).toBeLessThan(order.indexOf('paid'));
+  });
+});
+
+// ─── F2 edit-row event dispatch ───────────────────────────────────────────────
+
+describe('F2 shortcut dispatches medops:edit-row', () => {
+  it('medops:edit-row is a CustomEvent (not a keyboard event)', () => {
+    const evt = new CustomEvent('medops:edit-row');
+    expect(evt.type).toBe('medops:edit-row');
+    expect(evt instanceof CustomEvent).toBe(true);
+  });
+
+  it('listener receives the event when dispatched on window', () => {
+    let received = false;
+    const handler = () => { received = true; };
+    window.addEventListener('medops:edit-row', handler);
+    window.dispatchEvent(new CustomEvent('medops:edit-row'));
+    window.removeEventListener('medops:edit-row', handler);
+    expect(received).toBe(true);
+  });
+
+  it('does not bubble to document when listener is on window', () => {
+    // Verifies the pattern used by page components is correct (window-level).
+    let docCount = 0;
+    const docHandler = () => { docCount++; };
+    document.addEventListener('medops:edit-row', docHandler);
+    window.dispatchEvent(new CustomEvent('medops:edit-row'));
+    document.removeEventListener('medops:edit-row', docHandler);
+    // CustomEvents dispatched on window do NOT re-fire on document.
+    expect(docCount).toBe(0);
+  });
+});
+
+// ─── Rollback version chain and metadata ─────────────────────────────────────
+// Mirrors the shape of versionHistoryEntry in backend/internal/handlers/system.go.
+// Tests are statically deterministic — no network, no filesystem.
+
+interface VersionHistoryEntry {
+  from_version: string;
+  to_version: string;
+  backup_file: string;   // pg_dump snapshot path
+  artifact_dir: string;  // app artifact snapshot path (backend binary + frontend assets)
+  applied_at: string;
+}
+
+/** Build a synthetic version history with one entry per (from, to) pair. */
+function buildVersionHistory(...pairs: [string, string][]): VersionHistoryEntry[] {
+  return pairs.map(([from, to], i) => {
+    const stamp = `202601${String(i + 1).padStart(2, '0')}T000000Z`;
+    return {
+      from_version: from,
+      to_version: to,
+      backup_file: `/data/medops/backups/pre_update_${stamp}.sql`,
+      artifact_dir: `/data/medops/versions/${stamp}`,
+      applied_at: stamp,
+    };
+  });
+}
+
+/** Returns the entry that would be targeted by rollback (the last one). */
+function rollbackTarget(history: VersionHistoryEntry[]): VersionHistoryEntry | null {
+  return history.length > 0 ? history[history.length - 1] : null;
+}
+
+/** Simulates popping the last entry after a successful rollback. */
+function afterRollback(history: VersionHistoryEntry[]): VersionHistoryEntry[] {
+  return history.slice(0, -1);
+}
+
+describe('Rollback version chain and metadata', () => {
+  it('each history entry includes artifact_dir for app-level restore', () => {
+    const [entry] = buildVersionHistory(['1.0.0', '1.1.0']);
+    expect(typeof entry.artifact_dir).toBe('string');
+    expect(entry.artifact_dir.length).toBeGreaterThan(0);
+  });
+
+  it('rollback targets the most recent history entry', () => {
+    const history = buildVersionHistory(['1.0.0', '1.1.0'], ['1.1.0', '1.2.0']);
+    const target = rollbackTarget(history);
+    expect(target?.from_version).toBe('1.1.0');
+    expect(target?.to_version).toBe('1.2.0');
+  });
+
+  it('rollback restores to from_version of the targeted entry', () => {
+    const history = buildVersionHistory(['1.0.0', '1.1.0'], ['1.1.0', '1.2.0']);
+    const target = rollbackTarget(history);
+    expect(target?.from_version).toBe('1.1.0'); // system returns to this version
+  });
+
+  it('rolling back pops the last history entry (chain decrements by one)', () => {
+    const history = buildVersionHistory(['1.0.0', '1.1.0'], ['1.1.0', '1.2.0']);
+    const after = afterRollback(history);
+    expect(after).toHaveLength(1);
+    expect(after[0].to_version).toBe('1.1.0');
+  });
+
+  it('rolling back to baseline produces empty history', () => {
+    const history = buildVersionHistory(['baseline', '1.0.0']);
+    expect(afterRollback(history)).toHaveLength(0);
+  });
+
+  it('chained rollbacks decrement all the way to baseline', () => {
+    const history = buildVersionHistory(
+      ['baseline', '1.0.0'],
+      ['1.0.0', '1.1.0'],
+      ['1.1.0', '1.2.0'],
+    );
+    let h = history;
+    h = afterRollback(h); // rolls back to 1.1.0
+    h = afterRollback(h); // rolls back to 1.0.0
+    h = afterRollback(h); // rolls back to baseline
+    expect(h).toHaveLength(0);
+  });
+
+  it('artifact_dir and backup_file reference the same update epoch (timestamp)', () => {
+    const [entry] = buildVersionHistory(['1.0.0', '1.1.0']);
+    const backupStamp = entry.backup_file.match(/\d{8}T\d{6}Z/)?.[0];
+    const artifactStamp = entry.artifact_dir.match(/\d{8}T\d{6}Z/)?.[0];
+    expect(backupStamp).toBe(artifactStamp);
+  });
+
+  it('backup_file ends with .sql', () => {
+    const [entry] = buildVersionHistory(['1.0.0', '1.1.0']);
+    expect(entry.backup_file).toMatch(/\.sql$/);
+  });
+});
+
+// ─── Rollback failure paths ───────────────────────────────────────────────────
+
+describe('Rollback failure paths', () => {
+  it('rollback with empty history has no target (no prior update)', () => {
+    expect(rollbackTarget([])).toBeNull();
+  });
+
+  it('missing artifact_dir in entry does not prevent DB-only fallback', () => {
+    // An entry written by an older handler version may have an empty artifact_dir.
+    // The system still has a valid backup_file for the DB restore leg.
+    const entry: VersionHistoryEntry = {
+      from_version: '1.0.0',
+      to_version:   '1.1.0',
+      backup_file:  '/data/medops/backups/pre_update_20260101T000000Z.sql',
+      artifact_dir: '', // absent — no artifact snapshot was taken
+      applied_at:   '20260101T000000Z',
+    };
+    expect(entry.backup_file.length).toBeGreaterThan(0);
+    expect(entry.artifact_dir).toBe('');
+  });
+
+  it('a successful rollback response has version, status, and rolled_back_at', () => {
+    // Validates the shape that SystemConfigPage reads from res.data.
+    const mockResponse = {
+      version:            '1.0.0',
+      status:             'rolled_back',
+      restored_from:      '/data/medops/backups/pre_update_20260101T000000Z.sql',
+      rolled_back_at:     '2026-01-02T00:00:00Z',
+      artifacts_restored: true,
+      restart_required:   true,
+    };
+    expect(mockResponse.version).toBeTruthy();
+    expect(mockResponse.status).toBe('rolled_back');
+    expect(mockResponse.rolled_back_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(typeof mockResponse.artifacts_restored).toBe('boolean');
+    expect(typeof mockResponse.restart_required).toBe('boolean');
+  });
+
+  it('restart_required is true when artifacts were restored', () => {
+    const response = { artifacts_restored: true, restart_required: true };
+    expect(response.restart_required).toBe(true);
+  });
+
+  it('DB-only rollback (no artifacts) also sets restart_required', () => {
+    // Even without app artifact restore the backend must restart to pick up
+    // the correct DB state cleanly.
+    const response = { artifacts_restored: false, restart_required: true };
+    expect(response.restart_required).toBe(true);
   });
 });

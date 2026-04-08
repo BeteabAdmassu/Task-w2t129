@@ -15,7 +15,7 @@ import {
   safeStorage,
 } from 'electron';
 import { join } from 'path';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs';
 import { randomBytes } from 'crypto';
 import { spawn, ChildProcess } from 'child_process';
 import { setupTray, cleanupTray } from './tray';
@@ -50,12 +50,57 @@ const windows = new Set<BrowserWindow>();
 
 // ─── Backend subprocess ───────────────────────────────────────────────────────
 
+/**
+ * Resolves the backend binary to run.
+ *
+ * Priority order:
+ *  1. DATA_DIR/active/backend/medops-server[.exe]  — installed by an offline update package
+ *  2. process.resourcesPath/backend/medops-server[.exe]  — bundled at packaging time
+ *
+ * In dev mode (IS_DEV) the backend is assumed to be running externally (Docker / go run)
+ * and null is returned so startBackend waits on the health endpoint instead.
+ */
 function getBackendBinary(): string | null {
   if (IS_DEV) return null; // dev mode: backend runs externally (Docker / go run)
 
   const binaryName = process.platform === 'win32' ? 'medops-server.exe' : 'medops-server';
+
+  // 1. Check for an active override installed by an offline update.
+  const userDataDir = app.getPath('userData');
+  const dataDir = join(userDataDir, 'data');
+  const activeOverride = join(dataDir, 'active', 'backend', binaryName);
+  if (existsSync(activeOverride)) {
+    console.log('[main] Using active binary override:', activeOverride);
+    return activeOverride;
+  }
+
+  // 2. Fall back to the binary bundled at packaging time.
   const candidate = join(process.resourcesPath, 'backend', binaryName);
   return existsSync(candidate) ? candidate : null;
+}
+
+/**
+ * Resolves the frontend assets path to load in the renderer window.
+ *
+ * Priority order:
+ *  1. DATA_DIR/active/frontend/index.html  — installed by an offline update package
+ *  2. __dirname/../dist/index.html         — bundled at packaging time
+ *
+ * In dev mode the Vite dev server URL is used instead.
+ */
+function getFrontendPath(): string {
+  const VITE_DEV_URL = process.env.VITE_DEV_URL ?? 'http://localhost:3000';
+  if (IS_DEV) return VITE_DEV_URL;
+
+  const userDataDir = app.getPath('userData');
+  const dataDir = join(userDataDir, 'data');
+  const activeFrontend = join(dataDir, 'active', 'frontend', 'index.html');
+  if (existsSync(activeFrontend)) {
+    console.log('[main] Using active frontend override:', activeFrontend);
+    return activeFrontend;
+  }
+
+  return join(__dirname, '..', 'dist', 'index.html');
 }
 
 // startEmbeddedDatabase starts the bundled PostgreSQL instance via the
@@ -176,6 +221,73 @@ function waitForBackend(maxAttempts: number, resolve: () => void, reject: (e: Er
   check();
 }
 
+// ─── Restart flag watcher ─────────────────────────────────────────────────────
+
+/**
+ * watchRestartFlag polls for the sentinel file written by the backend's Rollback handler
+ * (DATA_DIR/restart.flag).  When found it:
+ *  1. Removes the flag so the watcher does not trigger again.
+ *  2. Stops the backend subprocess.
+ *  3. Starts a new backend subprocess from the (now-restored) active binary.
+ *  4. Reloads all renderer windows so they pick up the restored frontend assets.
+ *  5. Shows a system tray / desktop notification.
+ *
+ * This implements the "offline restart" leg of the version rollback — the database
+ * has already been restored by the time the flag is written.
+ */
+function watchRestartFlag(dataDir: string): void {
+  const flagPath = join(dataDir, 'restart.flag');
+  let handling = false;
+
+  const check = async (): Promise<void> => {
+    if (handling) return;
+    if (!existsSync(flagPath)) return;
+
+    handling = true;
+    let version = 'previous version';
+    try {
+      version = readFileSync(flagPath, 'utf8').trim() || version;
+      unlinkSync(flagPath);
+    } catch {
+      // Best-effort flag removal; proceed regardless.
+    }
+
+    console.log('[main] Restart flag detected — restarting backend for rollback to', version);
+
+    try {
+      await stopBackend();
+      await startBackend();
+
+      // Reload all renderer windows so they pick up the restored frontend assets.
+      for (const win of windows) {
+        if (!win.isDestroyed()) {
+          const frontendPath = getFrontendPath();
+          if (IS_DEV || frontendPath.startsWith('http')) {
+            win.loadURL(frontendPath);
+          } else {
+            win.loadFile(frontendPath);
+          }
+        }
+      }
+
+      new Notification({
+        title: 'MedOps — Rollback Complete',
+        body: `System has been restored to ${version}. All windows reloaded.`,
+      }).show();
+    } catch (err) {
+      dialog.showErrorBox(
+        'MedOps — Restart Failed',
+        `The backend could not restart after rollback.\n\n${(err as Error).message}\n\nPlease restart MedOps manually.`,
+      );
+    } finally {
+      handling = false;
+    }
+  };
+
+  // Poll every 2 seconds — low overhead, no file-system watch dependency.
+  setInterval(() => { void check(); }, 2000);
+}
+
 // ─── Secret bootstrap ─────────────────────────────────────────────────────────
 
 interface AppSecrets {
@@ -213,7 +325,7 @@ function ensureSecrets(userDataDir: string): AppSecrets {
         if (parsed.jwtSecret && parsed.encryptKey && parsed.hmacKey) {
           // Clean up legacy plain file if it exists from an older build
           if (existsSync(legacyPath)) {
-            try { require('fs').unlinkSync(legacyPath); } catch { /* ignore */ }
+            try { unlinkSync(legacyPath); } catch { /* ignore */ }
           }
           return parsed as AppSecrets;
         }
@@ -232,7 +344,7 @@ function ensureSecrets(userDataDir: string): AppSecrets {
     writeFileSync(encPath, ciphertext, { mode: 0o600 });
     // Remove any legacy plain file
     if (existsSync(legacyPath)) {
-      try { require('fs').unlinkSync(legacyPath); } catch { /* ignore */ }
+      try { unlinkSync(legacyPath); } catch { /* ignore */ }
     }
     console.log('[main] Generated and securely stored app secrets (safeStorage)');
     return secrets;
@@ -312,15 +424,13 @@ function createWindow(options: { url?: string; title?: string } = {}): BrowserWi
     show: false, // shown after 'ready-to-show'
   });
 
-  // In dev mode load the Vite dev server (port 3000) so hot-reload works.
-  // In packaged/production mode serve the pre-built SPA from dist/.
-  const VITE_DEV_URL = process.env.VITE_DEV_URL ?? 'http://localhost:3000';
-  const url = options.url ?? (IS_DEV ? VITE_DEV_URL : join(__dirname, '..', 'dist', 'index.html'));
+  // Resolve the asset path: active override > bundled > dev server.
+  const frontendPath = options.url ?? getFrontendPath();
 
-  if (IS_DEV || url.startsWith('http')) {
-    win.loadURL(url);
+  if (IS_DEV || frontendPath.startsWith('http')) {
+    win.loadURL(frontendPath);
   } else {
-    win.loadFile(url);
+    win.loadFile(frontendPath);
   }
 
   win.once('ready-to-show', () => win.show());
@@ -376,6 +486,30 @@ function registerIPC(): void {
   ipcMain.on('dialog:showMessage', async (_e, opts: Electron.MessageBoxOptions) => {
     if (mainWindow) await dialog.showMessageBox(mainWindow, opts);
   });
+
+  /**
+   * system:restart-backend — stops the running backend subprocess and starts a new one
+   * from the currently active binary (which may have just been swapped by a rollback or
+   * update).  All renderer windows are reloaded so they pick up the new frontend assets.
+   *
+   * Called from the renderer via window.electron.restartBackend() after a successful
+   * update or rollback, as an alternative to waiting for the polling-based restart flag.
+   */
+  ipcMain.handle('system:restart-backend', async () => {
+    console.log('[main] system:restart-backend IPC received — restarting...');
+    await stopBackend();
+    await startBackend();
+    for (const win of windows) {
+      if (!win.isDestroyed()) {
+        const frontendPath = getFrontendPath();
+        if (IS_DEV || frontendPath.startsWith('http')) {
+          win.loadURL(frontendPath);
+        } else {
+          win.loadFile(frontendPath);
+        }
+      }
+    }
+  });
 }
 
 // ─── App lifecycle ────────────────────────────────────────────────────────────
@@ -415,6 +549,11 @@ app.whenReady().then(async () => {
   }
 
   mainWindow = createWindow();
+
+  // Start polling for the restart flag written by the backend's Rollback handler.
+  // DATA_DIR is app.getPath('userData')/data — same path injected into the backend env.
+  const dataDir = join(app.getPath('userData'), 'data');
+  watchRestartFlag(dataDir);
 
   setupTray({
     icon: createAppIcon(),
