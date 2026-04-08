@@ -48,7 +48,7 @@ The seed admin account is created automatically by database migration `000001_in
 | Username | `admin`        |
 | Password | `AdminPass1234`|
 
-**The application forces a password change on first login.** The seed hash is embedded in the migration file (`000001_init.up.sql`) — no environment variable is needed.
+**The application forces a password change on first login.** The seed credential hash is embedded in `000001_init.up.sql`; the `must_change_password = true` flag is set by migration `000008_must_change_password.up.sql`. No environment variable is needed.
 
 ### Running the Application
 

@@ -1373,6 +1373,62 @@ func (r *Repository) CreateStatement(stmt *models.ChargeStatement) error {
 	return nil
 }
 
+// CreateStatementWithLineItems atomically persists a charge statement and all of
+// its line items in a single DB transaction. If the statement header insert or
+// any line-item insert fails, the transaction is rolled back and no partial data
+// is committed. Tenant scoping follows the same rules as CreateStatement and
+// CreateLineItem.
+func (r *Repository) CreateStatementWithLineItems(stmt *models.ChargeStatement, items []models.ChargeLineItem) error {
+	tx, err := r.DB.Begin()
+	if err != nil {
+		return fmt.Errorf("begin statement tx: %w", err)
+	}
+
+	if stmt.ID == "" {
+		stmt.ID = uuid.New().String()
+	}
+	stmt.CreatedAt = time.Now()
+
+	_, err = tx.Exec(
+		`INSERT INTO charge_statements (id, period_start, period_end, total_amount, expected_total, status,
+		        approved_by_1, approved_by_2, reconciled_at, variance_notes, paid_at, created_at, tenant_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+		stmt.ID, stmt.PeriodStart, stmt.PeriodEnd, stmt.TotalAmount, stmt.ExpectedTotal, stmt.Status,
+		stmt.ApprovedBy1, stmt.ApprovedBy2, stmt.ReconciledAt, stmt.VarianceNotes, stmt.PaidAt, stmt.CreatedAt, r.tenantID,
+	)
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("create statement in tx: %w", err)
+	}
+
+	for i := range items {
+		if items[i].ID == "" {
+			items[i].ID = uuid.New().String()
+		}
+		items[i].StatementID = stmt.ID
+		res, err := tx.Exec(
+			`INSERT INTO charge_line_items (id, statement_id, description, quantity, unit_price, surcharge, tax, total)
+			 SELECT $1, $2, $3, $4, $5, $6, $7, $8
+			 WHERE EXISTS (SELECT 1 FROM charge_statements WHERE id = $2 AND tenant_id = $9)`,
+			items[i].ID, stmt.ID, items[i].Description, items[i].Quantity,
+			items[i].UnitPrice, items[i].Surcharge, items[i].Tax, items[i].Total, r.tenantID,
+		)
+		if err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("create line item in tx: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			_ = tx.Rollback()
+			return fmt.Errorf("create line item: statement not found in tenant")
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit statement tx: %w", err)
+	}
+	return nil
+}
+
 // UpdateStatement updates an existing charge statement.
 func (r *Repository) UpdateStatement(stmt *models.ChargeStatement) error {
 	_, err := r.DB.Exec(
@@ -1674,6 +1730,24 @@ func (r *Repository) GetLatestStoredValueAdd(memberID string) (*models.MemberTra
 		return nil, fmt.Errorf("get latest stored value add: %w", err)
 	}
 	return t, nil
+}
+
+// HasStoredValueUsageAfter returns true if the member has any redemption or
+// stored-value-use transactions after the given timestamp. Used by the refund
+// handler to determine whether stored value has been consumed since the last add.
+func (r *Repository) HasStoredValueUsageAfter(memberID string, after time.Time) (bool, error) {
+	var count int
+	err := r.DB.QueryRow(
+		`SELECT COUNT(*) FROM member_transactions
+		 WHERE member_id = $1 AND tenant_id = $2
+		   AND type IN ('redeem', 'stored_value_use', 'usage')
+		   AND created_at > $3`,
+		memberID, r.tenantID, after,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("has stored value usage after: %w", err)
+	}
+	return count > 0, nil
 }
 
 // ListTiers is an alias for ListMembershipTiers.

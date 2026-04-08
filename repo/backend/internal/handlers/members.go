@@ -977,29 +977,22 @@ func (h *MemberHandler) RefundStoredValue(c echo.Context) error {
 		})
 	}
 
-	// Find the latest stored_value_add transaction by looking through recent transactions
-	transactions, _, err := h.repo.ListMemberTransactions(id, 1, 100)
+	// Use a direct DB query to find the true latest stored_value_add (not
+	// page-limited), so high-activity members with >100 transactions are handled correctly.
+	latestAdd, err := h.repo.GetLatestStoredValueAdd(id)
 	if err != nil {
-		logrus.WithError(err).Error("Failed to list member transactions for refund check")
+		logrus.WithError(err).Error("Failed to retrieve latest stored value addition for refund check")
 		return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error: "Failed to check transaction history",
 			Code:  http.StatusInternalServerError,
 		})
 	}
 
-	var latestAdd *models.MemberTransaction
-	for i := range transactions {
-		if transactions[i].Type == "stored_value_add" {
-			latestAdd = &transactions[i]
-			break
-		}
-	}
-
 	if latestAdd == nil {
 		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "No stored value addition found",
 			Code:    http.StatusBadRequest,
-			Details: "No recent stored value addition to refund",
+			Details: "No stored value addition to refund",
 		})
 	}
 
@@ -1012,21 +1005,23 @@ func (h *MemberHandler) RefundStoredValue(c echo.Context) error {
 		})
 	}
 
-	// Enforce "unused-only" refund eligibility: check whether any redemption or
-	// usage transaction occurred after the latest stored_value_add.
-	for i := range transactions {
-		tx := transactions[i]
-		// Only look at transactions after the last add
-		if !tx.CreatedAt.After(latestAdd.CreatedAt) {
-			continue
-		}
-		if tx.Type == "redeem" || tx.Type == "stored_value_use" || tx.Type == "usage" {
-			return c.JSON(http.StatusBadRequest, models.ErrorResponse{
-				Error:   "Stored value already used",
-				Code:    http.StatusBadRequest,
-				Details: "Cannot refund stored value that has already been partially or fully redeemed",
-			})
-		}
+	// Enforce "unused-only" refund eligibility: use a direct DB query to check
+	// whether any redemption or usage occurred after the latest add, covering all
+	// transactions without the 100-record page limit.
+	hasUsage, err := h.repo.HasStoredValueUsageAfter(id, latestAdd.CreatedAt)
+	if err != nil {
+		logrus.WithError(err).Error("Failed to check stored value usage for refund eligibility")
+		return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error: "Failed to check refund eligibility",
+			Code:  http.StatusInternalServerError,
+		})
+	}
+	if hasUsage {
+		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Stored value already used",
+			Code:    http.StatusBadRequest,
+			Details: "Cannot refund stored value that has already been partially or fully redeemed",
+		})
 	}
 
 	// Check member still has enough balance

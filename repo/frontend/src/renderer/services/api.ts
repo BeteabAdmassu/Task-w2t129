@@ -162,8 +162,12 @@ export const chargesAPI = {
   listStatements: (params?: { page?: number; page_size?: number }) =>
     api.get('/statements', { params }),
   getStatement: (id: string) => api.get(`/statements/${id}`),
-  generateStatement: (data: { period_start: string; period_end: string }) =>
-    api.post('/statements/generate', data),
+  generateStatement: (data: {
+    period_start: string;
+    period_end: string;
+    rate_table_id: string;
+    line_items: Array<{ description: string; quantity: number }>;
+  }) => api.post('/statements/generate', data),
   // expected_total is required so the backend can compute ABS(total-expected)>25 variance check.
   reconcile: (id: string, data: { expected_total: number; variance_notes?: string }) =>
     api.post(`/statements/${id}/reconcile`, data),

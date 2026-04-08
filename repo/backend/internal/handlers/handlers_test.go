@@ -486,3 +486,82 @@ func TestImportContent_MissingFile_Returns400(t *testing.T) {
 		t.Errorf("expected 400 for missing file, got %d", rec.Code)
 	}
 }
+
+// ---------- ChargeHandler — GenerateStatement input validation ----------
+// These tests exercise validation gates that fire before any repository/DB call,
+// so a nil repo is safe to use.
+
+func TestGenerateStatement_MissingRateTableID_Returns400(t *testing.T) {
+	e := echo.New()
+	body := `{"period_start":"2026-01-01","period_end":"2026-01-31","rate_table_id":"","line_items":[{"description":"Transport","quantity":5}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/statements/generate", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	h := NewChargeHandler(nil, "test-hmac-key")
+	if err := h.GenerateStatement(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for empty rate_table_id, got %d", rec.Code)
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["error"] == nil {
+		t.Error("expected non-empty error field in response body")
+	}
+}
+
+func TestGenerateStatement_EmptyLineItems_Returns400(t *testing.T) {
+	e := echo.New()
+	body := `{"period_start":"2026-01-01","period_end":"2026-01-31","rate_table_id":"rt-abc","line_items":[]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/statements/generate", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	h := NewChargeHandler(nil, "test-hmac-key")
+	if err := h.GenerateStatement(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for empty line_items slice, got %d", rec.Code)
+	}
+}
+
+func TestGenerateStatement_InvalidPeriodStartFormat_Returns400(t *testing.T) {
+	e := echo.New()
+	// period_start uses DD/MM/YYYY — wrong format; one line item supplied so
+	// the empty-items gate is not reached first.
+	body := `{"period_start":"01/01/2026","period_end":"2026-01-31","rate_table_id":"rt-abc","line_items":[{"description":"x","quantity":1}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/statements/generate", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	h := NewChargeHandler(nil, "test-hmac-key")
+	if err := h.GenerateStatement(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid period_start format, got %d", rec.Code)
+	}
+}
+
+func TestGenerateStatement_MissingPeriodDates_Returns400(t *testing.T) {
+	e := echo.New()
+	body := `{"period_start":"","period_end":"","rate_table_id":"rt-abc","line_items":[{"description":"x","quantity":1}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/statements/generate", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	h := NewChargeHandler(nil, "test-hmac-key")
+	if err := h.GenerateStatement(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing period dates, got %d", rec.Code)
+	}
+}

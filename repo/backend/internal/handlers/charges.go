@@ -430,12 +430,43 @@ func (h *ChargeHandler) GetStatement(c echo.Context) error {
 	})
 }
 
-// GenerateStatement creates a new charge statement with status=draft.
+// statementTaxRate is the fixed tax rate applied when a rate table is marked taxable.
+const statementTaxRate = 0.085
+
+// rateTableTier represents a single pricing tier within a rate table.
+type rateTableTier struct {
+	Min  float64 `json:"min"`
+	Max  float64 `json:"max"`
+	Rate float64 `json:"rate"`
+}
+
+// generateLineItemInput is the caller-supplied description + quantity for one line item.
+type generateLineItemInput struct {
+	Description string  `json:"description"`
+	Quantity    float64 `json:"quantity"`
+}
+
+// applyTierRate finds the rate for the given quantity from an ordered tier slice.
+// If no tier matches, rate 0 is returned.
+func applyTierRate(tiers []rateTableTier, qty float64) float64 {
+	for _, t := range tiers {
+		if qty >= t.Min && qty <= t.Max {
+			return t.Rate
+		}
+	}
+	return 0
+}
+
+// GenerateStatement creates a new charge statement with rate-table-driven pricing.
+// The caller supplies a rate_table_id and a list of {description, quantity} inputs;
+// the server looks up the selected rate table, applies tier rates, fuel surcharge,
+// and (when taxable) tax to derive each line-item total.
 func (h *ChargeHandler) GenerateStatement(c echo.Context) error {
 	var req struct {
 		PeriodStart string                  `json:"period_start"`
 		PeriodEnd   string                  `json:"period_end"`
-		LineItems   []models.ChargeLineItem `json:"line_items"`
+		RateTableID string                  `json:"rate_table_id"`
+		LineItems   []generateLineItemInput `json:"line_items"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
@@ -449,6 +480,20 @@ func (h *ChargeHandler) GenerateStatement(c echo.Context) error {
 			Error:   "Validation failed",
 			Code:    http.StatusBadRequest,
 			Details: "Period start and end dates are required",
+		})
+	}
+	if req.RateTableID == "" {
+		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Validation failed",
+			Code:    http.StatusBadRequest,
+			Details: "rate_table_id is required",
+		})
+	}
+	if len(req.LineItems) == 0 {
+		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Validation failed",
+			Code:    http.StatusBadRequest,
+			Details: "At least one line item is required",
 		})
 	}
 
@@ -467,46 +512,86 @@ func (h *ChargeHandler) GenerateStatement(c echo.Context) error {
 		})
 	}
 
-	// Calculate total amount from line items
+	// Load the selected rate table.
+	rt, err := h.repo.GetRateTableByID(req.RateTableID)
+	if err != nil {
+		logrus.WithError(err).Error("Failed to retrieve rate table for statement generation")
+		return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error: "Failed to retrieve rate table",
+			Code:  http.StatusInternalServerError,
+		})
+	}
+	if rt == nil {
+		return c.JSON(http.StatusNotFound, models.ErrorResponse{
+			Error:   "Rate table not found",
+			Code:    http.StatusNotFound,
+			Details: fmt.Sprintf("No rate table with id %q", req.RateTableID),
+		})
+	}
+
+	// Parse tier definitions from the rate table.
+	var tiers []rateTableTier
+	if err := json.Unmarshal(rt.Tiers, &tiers); err != nil {
+		logrus.WithError(err).Error("Failed to parse rate table tiers")
+		return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error: "Rate table has invalid tier configuration",
+			Code:  http.StatusInternalServerError,
+		})
+	}
+
+	// Build priced line items by applying tier rate, fuel surcharge, and tax.
+	var computedItems []models.ChargeLineItem
 	var totalAmount float64
-	for i := range req.LineItems {
-		item := &req.LineItems[i]
-		item.Total = (item.Quantity * item.UnitPrice) + item.Surcharge + item.Tax
-		totalAmount += item.Total
+	for _, inp := range req.LineItems {
+		if inp.Quantity < 0 {
+			return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+				Error:   "Validation failed",
+				Code:    http.StatusBadRequest,
+				Details: "Line item quantity must be non-negative",
+			})
+		}
+		unitPrice := applyTierRate(tiers, inp.Quantity)
+		base := inp.Quantity * unitPrice
+		surcharge := base * rt.FuelSurchargePct / 100
+		var tax float64
+		if rt.Taxable {
+			tax = (base + surcharge) * statementTaxRate
+		}
+		total := base + surcharge + tax
+		totalAmount += total
+		computedItems = append(computedItems, models.ChargeLineItem{
+			Description: inp.Description,
+			Quantity:    inp.Quantity,
+			UnitPrice:   unitPrice,
+			Surcharge:   surcharge,
+			Tax:         tax,
+			Total:       total,
+		})
 	}
 
 	statement := &models.ChargeStatement{
-		ID:          uuid.New().String(),
 		PeriodStart: req.PeriodStart,
 		PeriodEnd:   req.PeriodEnd,
 		TotalAmount: totalAmount,
 		Status:      "pending",
-		CreatedAt:   time.Now(),
 	}
 
-	if err := h.repo.CreateStatement(statement); err != nil {
-		logrus.WithError(err).Error("Failed to create statement")
+	// Persist atomically: if any line-item insert fails the whole operation rolls
+	// back so no orphan statement header is committed to the database.
+	if err := h.repo.CreateStatementWithLineItems(statement, computedItems); err != nil {
+		logrus.WithError(err).Error("Failed to persist statement with line items")
 		return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error: "Failed to create statement",
 			Code:  http.StatusInternalServerError,
 		})
 	}
 
-	// Create line items
-	for i := range req.LineItems {
-		item := &req.LineItems[i]
-		item.ID = uuid.New().String()
-		item.StatementID = statement.ID
-		if err := h.repo.CreateLineItem(item); err != nil {
-			logrus.WithError(err).Error("Failed to create line item")
-		}
-	}
-
 	userID := middleware.GetUserID(c)
 	details, _ := json.Marshal(map[string]interface{}{
-		"period_start": req.PeriodStart,
-		"period_end":   req.PeriodEnd,
-		"total_amount": totalAmount,
+		"period_start":  req.PeriodStart,
+		"period_end":    req.PeriodEnd,
+		"rate_table_id": req.RateTableID,
+		"total_amount":  totalAmount,
 	})
 	h.repo.CreateAuditLog(&models.AuditLogEntry{
 		UserID:     userID,
@@ -523,7 +608,7 @@ func (h *ChargeHandler) GenerateStatement(c echo.Context) error {
 
 	return c.JSON(http.StatusCreated, map[string]interface{}{
 		"statement":  statement,
-		"line_items": req.LineItems,
+		"line_items": computedItems,
 	})
 }
 

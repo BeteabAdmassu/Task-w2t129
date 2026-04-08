@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { chargesAPI } from '../../services/api';
 import { useDraftAutoSave } from '../../hooks/useDraftAutoSave';
 import { DraftRecoveryDialog } from '../common/DraftRecoveryDialog';
-import type { ChargeStatement, ChargeLineItem, User } from '../../types';
+import type { ChargeStatement, ChargeLineItem, RateTable, User } from '../../types';
 import LoadingSpinner from '../common/LoadingSpinner';
 import ErrorMessage from '../common/ErrorMessage';
 import EmptyState from '../common/EmptyState';
@@ -67,10 +67,25 @@ const StatementsPage: React.FC = () => {
 
   // Generate form
   const [showGenerate, setShowGenerate] = useState(false);
-  const [genForm, setGenForm] = useState({ period_start: '', period_end: '' });
+  const [genForm, setGenForm] = useState({ period_start: '', period_end: '', rate_table_id: '' });
+  const [genLineItems, setGenLineItems] = useState<Array<{ description: string; quantity: string }>>(
+    [{ description: '', quantity: '' }]
+  );
   const [genErr, setGenErr] = useState('');
   const [genSubmitting, setGenSubmitting] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
+
+  // Rate tables for the generate-statement dropdown
+  const [rateTables, setRateTables] = useState<RateTable[]>([]);
+  const [rateTablesLoading, setRateTablesLoading] = useState(false);
+
+  useEffect(() => {
+    setRateTablesLoading(true);
+    chargesAPI.listRateTables()
+      .then(res => setRateTables(res.data.data || res.data || []))
+      .catch(() => setRateTables([]))
+      .finally(() => setRateTablesLoading(false));
+  }, []);
 
   const { clearDraft: clearGenDraft } = useDraftAutoSave('statement_generate', null, genForm);
 
@@ -99,14 +114,28 @@ const StatementsPage: React.FC = () => {
     if (!genForm.period_start) { setGenErr('Start date is required'); return; }
     if (!genForm.period_end) { setGenErr('End date is required'); return; }
     if (new Date(genForm.period_end) <= new Date(genForm.period_start)) { setGenErr('End date must be after start date'); return; }
+    if (!genForm.rate_table_id) { setGenErr('Rate table is required'); return; }
+    const validItems = genLineItems.filter(li => li.description.trim() || li.quantity.trim());
+    if (validItems.length === 0) { setGenErr('At least one line item is required'); return; }
+    for (const li of validItems) {
+      if (!li.description.trim()) { setGenErr('Each line item must have a description'); return; }
+      const qty = parseFloat(li.quantity);
+      if (isNaN(qty) || qty < 0) { setGenErr('Each line item must have a non-negative quantity'); return; }
+    }
     setGenSubmitting(true);
     setGenErr('');
     try {
-      await chargesAPI.generateStatement({ period_start: genForm.period_start, period_end: genForm.period_end });
+      await chargesAPI.generateStatement({
+        period_start: genForm.period_start,
+        period_end: genForm.period_end,
+        rate_table_id: genForm.rate_table_id,
+        line_items: validItems.map(li => ({ description: li.description.trim(), quantity: parseFloat(li.quantity) })),
+      });
       clearGenDraft();
       showSuccess('Statement generated successfully');
       setShowGenerate(false);
-      setGenForm({ period_start: '', period_end: '' });
+      setGenForm({ period_start: '', period_end: '', rate_table_id: '' });
+      setGenLineItems([{ description: '', quantity: '' }]);
       fetchStatements();
     } catch (e: any) {
       setGenErr(e.response?.data?.error || 'Failed to generate statement');
@@ -246,6 +275,7 @@ const StatementsPage: React.FC = () => {
       setGenForm({
         period_start: (s as any).period_start || '',
         period_end: (s as any).period_end || '',
+        rate_table_id: (s as any).rate_table_id || '',
       });
       setShowGenerate(true);
     }
@@ -411,18 +441,73 @@ const StatementsPage: React.FC = () => {
 
       {/* Generate Statement Modal */}
       {showGenerate && (
-        <Modal title="Generate Statement" onClose={() => { setShowGenerate(false); setGenErr(''); }} width={420}>
+        <Modal title="Generate Statement" onClose={() => { setShowGenerate(false); setGenErr(''); setGenLineItems([{ description: '', quantity: '' }]); }} width={560}>
           {genErr && <div style={{ color: '#dc3545', marginBottom: '0.75rem', fontSize: '0.85rem' }}>{genErr}</div>}
-          <div style={{ marginBottom: '0.75rem' }}>
-            <label style={{ display: 'block', marginBottom: '0.25rem', fontWeight: 500 }}>Period Start *</label>
-            <input type="date" value={genForm.period_start} onChange={e => setGenForm({ ...genForm, period_start: e.target.value })} style={inputStyle} />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.25rem', fontWeight: 500 }}>Period Start *</label>
+              <input type="date" value={genForm.period_start} onChange={e => setGenForm({ ...genForm, period_start: e.target.value })} style={inputStyle} />
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.25rem', fontWeight: 500 }}>Period End *</label>
+              <input type="date" value={genForm.period_end} onChange={e => setGenForm({ ...genForm, period_end: e.target.value })} style={inputStyle} />
+            </div>
           </div>
-          <div style={{ marginBottom: '1rem' }}>
-            <label style={{ display: 'block', marginBottom: '0.25rem', fontWeight: 500 }}>Period End *</label>
-            <input type="date" value={genForm.period_end} onChange={e => setGenForm({ ...genForm, period_end: e.target.value })} style={inputStyle} />
+          <div style={{ marginBottom: '0.75rem' }}>
+            <label style={{ display: 'block', marginBottom: '0.25rem', fontWeight: 500 }}>Rate Table *</label>
+            {rateTablesLoading ? (
+              <div style={{ fontSize: '0.85rem', color: '#666' }}>Loading rate tables…</div>
+            ) : (
+              <select value={genForm.rate_table_id} onChange={e => setGenForm({ ...genForm, rate_table_id: e.target.value })} style={{ ...inputStyle, appearance: 'auto' as const }}>
+                <option value="">— Select a rate table —</option>
+                {rateTables.map(rt => (
+                  <option key={rt.id} value={rt.id}>{rt.name} ({rt.type})</option>
+                ))}
+              </select>
+            )}
+          </div>
+          <div style={{ marginBottom: '0.75rem' }}>
+            <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500 }}>Line Items *</label>
+            {genLineItems.map((li, idx) => (
+              <div key={idx} style={{ display: 'grid', gridTemplateColumns: '1fr 120px 32px', gap: '0.4rem', marginBottom: '0.4rem', alignItems: 'center' }}>
+                <input
+                  placeholder="Description"
+                  value={li.description}
+                  onChange={e => {
+                    const updated = [...genLineItems];
+                    updated[idx] = { ...updated[idx], description: e.target.value };
+                    setGenLineItems(updated);
+                  }}
+                  style={inputStyle}
+                />
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="Quantity"
+                  value={li.quantity}
+                  onChange={e => {
+                    const updated = [...genLineItems];
+                    updated[idx] = { ...updated[idx], quantity: e.target.value };
+                    setGenLineItems(updated);
+                  }}
+                  style={inputStyle}
+                />
+                <button
+                  onClick={() => setGenLineItems(genLineItems.filter((_, i) => i !== idx))}
+                  disabled={genLineItems.length === 1}
+                  style={{ padding: '0.4rem', background: '#dc3545', color: '#fff', border: 'none', borderRadius: 4, cursor: genLineItems.length === 1 ? 'not-allowed' : 'pointer', opacity: genLineItems.length === 1 ? 0.4 : 1 }}
+                  title="Remove"
+                >×</button>
+              </div>
+            ))}
+            <button
+              onClick={() => setGenLineItems([...genLineItems, { description: '', quantity: '' }])}
+              style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.3rem 0.75rem', marginTop: '0.25rem' }}
+            >+ Add Line Item</button>
           </div>
           <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
-            <button onClick={() => { setShowGenerate(false); setGenErr(''); }} style={btnSecondary}>Cancel</button>
+            <button onClick={() => { setShowGenerate(false); setGenErr(''); setGenLineItems([{ description: '', quantity: '' }]); }} style={btnSecondary}>Cancel</button>
             <button onClick={handleGenerate} disabled={genSubmitting} style={genSubmitting ? btnDisabled : btnPrimary}>
               {genSubmitting ? 'Generating...' : 'Generate'}
             </button>

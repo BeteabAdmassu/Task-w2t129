@@ -287,10 +287,17 @@ func (h *FileHandler) ExportZip(c echo.Context) error {
 		if canDownloadFile(userID, role, f.UploadedBy) {
 			authorizedFiles = append(authorizedFiles, f)
 		} else {
-			logrus.WithFields(logrus.Fields{
-				"user_id": userID,
-				"file_id": f.ID,
-			}).Warn("ZIP export: skipping file caller is not authorized to access")
+			// Apply the same work-order linkage fallback used in single-file download,
+			// so ZIP export authorization is consistent with per-file download policy.
+			linked, linkErr := h.repo.IsFileLinkedToUserWorkOrder(f.ID, userID)
+			if linkErr == nil && linked {
+				authorizedFiles = append(authorizedFiles, f)
+			} else {
+				logrus.WithFields(logrus.Fields{
+					"user_id": userID,
+					"file_id": f.ID,
+				}).Warn("ZIP export: skipping file caller is not authorized to access")
+			}
 		}
 	}
 

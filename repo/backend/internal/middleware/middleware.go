@@ -138,6 +138,21 @@ func JWTAuth(secret string, lookupUser ...UserLookup) echo.MiddlewareFunc {
 						Details: "This account is temporarily locked",
 					})
 				}
+				// Block all endpoints except password-change/logout/me when a
+				// forced password change is pending. This prevents API clients
+				// from bypassing the UI-level guard.
+				if user.MustChangePassword {
+					path := c.Request().URL.Path
+					if !strings.HasSuffix(path, "/auth/password") &&
+						!strings.HasSuffix(path, "/auth/logout") &&
+						!strings.HasSuffix(path, "/auth/me") {
+						return c.JSON(http.StatusForbidden, models.ErrorResponse{
+							Error:   "Password change required",
+							Code:    http.StatusForbidden,
+							Details: "You must change your password before accessing this resource",
+						})
+					}
+				}
 				// Use live role from DB so role changes take effect immediately.
 				role = user.Role
 			}
