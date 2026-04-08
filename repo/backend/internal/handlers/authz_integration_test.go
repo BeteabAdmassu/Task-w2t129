@@ -1328,6 +1328,91 @@ func TestListStocktakes_RepoError_Returns500(t *testing.T) {
 	}
 }
 
+// ─── H-01: Work-order mutation object-level authorization ────────────────────
+//
+// A maintenance_tech who is NOT the assigned technician must receive 403 from
+// both UpdateWorkOrder and CloseWorkOrder (regression guard for H-01 fix).
+
+// TestUpdateWorkOrder_NonAssignedTech_Forbidden ensures that a maintenance_tech
+// cannot mutate a work order they are not assigned to.
+func TestUpdateWorkOrder_NonAssignedTech_Forbidden(t *testing.T) {
+	otherTech := "uid-other-tech"
+	assigned := "uid-assigned-tech"
+	wo := &models.WorkOrder{
+		ID:          "wo-authz-01",
+		SubmittedBy: "uid-submitter",
+		AssignedTo:  &assigned,
+		Status:      "dispatched",
+	}
+	store := &stubWorkOrderStore{wo: wo}
+	h := &WorkOrderHandler{repo: store}
+
+	body := `{"status":"in_progress"}`
+	c, rec := echoCtxWithBody(http.MethodPut, "/work-orders/wo-authz-01", otherTech, "maintenance_tech", body)
+	c.SetParamNames("id")
+	c.SetParamValues("wo-authz-01")
+
+	if err := h.UpdateWorkOrder(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("non-assigned maintenance_tech: expected 403; got %d — body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCloseWorkOrder_NonAssignedTech_Forbidden ensures that a maintenance_tech
+// cannot close a work order they are not assigned to.
+func TestCloseWorkOrder_NonAssignedTech_Forbidden(t *testing.T) {
+	otherTech := "uid-other-tech"
+	assigned := "uid-assigned-tech"
+	wo := &models.WorkOrder{
+		ID:          "wo-authz-02",
+		SubmittedBy: "uid-submitter",
+		AssignedTo:  &assigned,
+		Status:      "in_progress",
+	}
+	store := &stubWorkOrderStore{wo: wo}
+	h := &WorkOrderHandler{repo: store}
+
+	body := `{"parts_cost":50,"labor_cost":100}`
+	c, rec := echoCtxWithBody(http.MethodPost, "/work-orders/wo-authz-02/close", otherTech, "maintenance_tech", body)
+	c.SetParamNames("id")
+	c.SetParamValues("wo-authz-02")
+
+	if err := h.CloseWorkOrder(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("non-assigned maintenance_tech: expected 403; got %d — body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestUpdateWorkOrder_AssignedTech_Allowed verifies the positive case: the
+// assigned technician can update their own work order.
+func TestUpdateWorkOrder_AssignedTech_Allowed(t *testing.T) {
+	assigned := "uid-assigned-tech"
+	wo := &models.WorkOrder{
+		ID:          "wo-authz-03",
+		SubmittedBy: "uid-submitter",
+		AssignedTo:  &assigned,
+		Status:      "dispatched",
+	}
+	store := &stubWorkOrderStore{wo: wo}
+	h := &WorkOrderHandler{repo: store}
+
+	body := `{"status":"in_progress"}`
+	c, rec := echoCtxWithBody(http.MethodPut, "/work-orders/wo-authz-03", assigned, "maintenance_tech", body)
+	c.SetParamNames("id")
+	c.SetParamValues("wo-authz-03")
+
+	if err := h.UpdateWorkOrder(c); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("assigned maintenance_tech: expected 200; got %d — body: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestRevealSensitiveFields_NonAdmin_Forbidden is a duplicate-coverage guard
 // that the reveal endpoint's adminRole middleware still blocks non-admins after
 // the F-002 fix (role middleware must not have been weakened).

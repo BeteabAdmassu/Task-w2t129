@@ -323,6 +323,17 @@ func (h *WorkOrderHandler) UpdateWorkOrder(c echo.Context) error {
 		})
 	}
 
+	// Object-level authorization: only the assigned technician or admin may mutate.
+	userID := middleware.GetUserID(c)
+	role := middleware.GetUserRole(c)
+	if !canViewWorkOrder(userID, role, wo.SubmittedBy, wo.AssignedTo) {
+		return c.JSON(http.StatusForbidden, models.ErrorResponse{
+			Error:   "Access denied",
+			Code:    http.StatusForbidden,
+			Details: "You are not authorized to modify this work order",
+		})
+	}
+
 	var body struct {
 		Status      *string `json:"status"`
 		Description *string `json:"description"`
@@ -378,7 +389,6 @@ func (h *WorkOrderHandler) UpdateWorkOrder(c echo.Context) error {
 		})
 	}
 
-	userID := middleware.GetUserID(c)
 	details, _ := json.Marshal(map[string]string{"wo_id": id})
 	h.repo.CreateAuditLog(&models.AuditLogEntry{
 		UserID:     userID,
@@ -415,6 +425,17 @@ func (h *WorkOrderHandler) CloseWorkOrder(c echo.Context) error {
 		})
 	}
 
+	// Object-level authorization: only the assigned technician or admin may close.
+	closeUserID := middleware.GetUserID(c)
+	closeRole := middleware.GetUserRole(c)
+	if !canViewWorkOrder(closeUserID, closeRole, wo.SubmittedBy, wo.AssignedTo) {
+		return c.JSON(http.StatusForbidden, models.ErrorResponse{
+			Error:   "Access denied",
+			Code:    http.StatusForbidden,
+			Details: "You are not authorized to close this work order",
+		})
+	}
+
 	if wo.Status == "completed" || wo.Status == "closed" || wo.Status == "cancelled" {
 		return c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error:   "Work order already closed or cancelled",
@@ -445,14 +466,13 @@ func (h *WorkOrderHandler) CloseWorkOrder(c echo.Context) error {
 		})
 	}
 
-	userID := middleware.GetUserID(c)
 	details, _ := json.Marshal(map[string]interface{}{
 		"wo_id":      id,
 		"parts_cost": req.PartsCost,
 		"labor_cost": req.LaborCost,
 	})
 	h.repo.CreateAuditLog(&models.AuditLogEntry{
-		UserID:     userID,
+		UserID:     closeUserID,
 		Action:     "close_work_order",
 		EntityType: "work_order",
 		EntityID:   id,
@@ -460,7 +480,7 @@ func (h *WorkOrderHandler) CloseWorkOrder(c echo.Context) error {
 	})
 
 	logrus.WithFields(logrus.Fields{
-		"user_id": userID,
+		"user_id": closeUserID,
 		"wo_id":   id,
 	}).Info("Work order closed")
 

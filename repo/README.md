@@ -73,6 +73,20 @@ docker compose up --build -d
 ./run_tests.sh
 ```
 
+### Unit Tests (without Docker)
+
+**Backend** (requires Go 1.22+ and a running PostgreSQL or test DB):
+```bash
+cd backend
+go test ./...
+```
+
+**Frontend** (requires Node.js 18+):
+```bash
+cd frontend
+npm test
+```
+
 ## Environment Variables
 
 | Variable | Default | Description |

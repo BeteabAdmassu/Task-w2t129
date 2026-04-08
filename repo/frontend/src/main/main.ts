@@ -542,7 +542,7 @@ app.whenReady().then(async () => {
   } catch (err) {
     await dialog.showErrorBox(
       'Backend Error',
-      `Could not start the MedOps backend service.\n\n${(err as Error).message}\n\nPlease ensure PostgreSQL is running on localhost:5432 and try again.`,
+      `Could not start the MedOps backend service.\n\n${(err as Error).message}\n\nPlease ensure the embedded PostgreSQL instance started correctly (port 5433) and try again.`,
     );
     app.quit();
     return;

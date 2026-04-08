@@ -144,6 +144,14 @@ type Member struct {
 	ViolationNotes     string `json:"violation_notes,omitempty"`
 }
 
+// MemberExpiryReminder contains only the non-sensitive fields needed for
+// tray expiry notifications. Safe to return to any authenticated role.
+type MemberExpiryReminder struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
 type MembershipTier struct {
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`

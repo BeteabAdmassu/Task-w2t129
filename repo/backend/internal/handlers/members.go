@@ -1276,6 +1276,27 @@ func (h *MemberHandler) CreateSessionPackageHandler(c echo.Context) error {
 }
 
 // ListTiers returns all membership tiers.
+// GetMembershipReminders returns members expiring within 14 days.
+// This endpoint is accessible to all authenticated roles so the system tray
+// can show expiry notifications regardless of which role is currently logged in.
+// Only non-sensitive fields (id, name, expires_at) are returned.
+func (h *MemberHandler) GetMembershipReminders(c echo.Context) error {
+	reminders, err := h.repo.ListExpiringMembers(14)
+	if err != nil {
+		logrus.WithError(err).Error("Failed to list expiring members for reminders")
+		return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error: "Failed to retrieve membership reminders",
+			Code:  http.StatusInternalServerError,
+		})
+	}
+	if reminders == nil {
+		reminders = []models.MemberExpiryReminder{}
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"data": reminders,
+	})
+}
+
 func (h *MemberHandler) ListTiers(c echo.Context) error {
 	tiers, err := h.repo.ListMembershipTiers()
 	if err != nil {

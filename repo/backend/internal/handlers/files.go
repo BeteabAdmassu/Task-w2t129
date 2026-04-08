@@ -122,15 +122,20 @@ func (h *FileHandler) Upload(c echo.Context) error {
 	mimeType := http.DetectContentType(content)
 
 	uploaderID := middleware.GetUserID(c)
+	// Apply default retention policy: regulated medical documents are retained for 7 years.
+	// This ensures the retention scheduler can enforce expiry; the field can be overridden
+	// by a future policy-management endpoint if finer-grained control is required.
+	defaultRetention := time.Now().AddDate(7, 0, 0)
 	managedFile := &models.ManagedFile{
-		ID:           fileID,
-		SHA256:       hashStr,
-		OriginalName: file.Filename,
-		MimeType:     mimeType,
-		SizeBytes:    file.Size,
-		StoragePath:  storagePath,
-		UploadedBy:   &uploaderID,
-		CreatedAt:    time.Now(),
+		ID:             fileID,
+		SHA256:         hashStr,
+		OriginalName:   file.Filename,
+		MimeType:       mimeType,
+		SizeBytes:      file.Size,
+		StoragePath:    storagePath,
+		UploadedBy:     &uploaderID,
+		RetentionUntil: &defaultRetention,
+		CreatedAt:      time.Now(),
 	}
 
 	if err := h.repo.CreateFile(managedFile); err != nil {

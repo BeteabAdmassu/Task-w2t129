@@ -1060,6 +1060,35 @@ func (r *Repository) ListMembers(search string, page, pageSize int) ([]models.Me
 	return members, total, rows.Err()
 }
 
+// ListExpiringMembers returns members whose membership expires within the given
+// number of days. Only non-sensitive fields (id, name, expires_at) are selected
+// so the result can be safely returned to any authenticated role for tray reminders.
+func (r *Repository) ListExpiringMembers(withinDays int) ([]models.MemberExpiryReminder, error) {
+	rows, err := r.DB.Query(
+		`SELECT id, name, expires_at
+		 FROM members
+		 WHERE expires_at IS NOT NULL
+		   AND expires_at > NOW()
+		   AND expires_at < NOW() + ($1 * INTERVAL '1 day')
+		   AND tenant_id = $2
+		 ORDER BY expires_at`, withinDays, r.tenantID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list expiring members: %w", err)
+	}
+	defer rows.Close()
+
+	var out []models.MemberExpiryReminder
+	for rows.Next() {
+		var m models.MemberExpiryReminder
+		if err := rows.Scan(&m.ID, &m.Name, &m.ExpiresAt); err != nil {
+			return nil, fmt.Errorf("list expiring members scan: %w", err)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // GetMember retrieves a single member by ID.
 func (r *Repository) GetMember(id string) (*models.Member, error) {
 	m := &models.Member{}

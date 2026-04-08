@@ -93,7 +93,8 @@ func main() {
 	e.Use(echomw.Recover())
 	e.Use(middleware.RequestLogger())
 	// CORS: restricted to localhost origins for offline desktop deployment.
-	// Electron renderer uses file:// or localhost; no external origins are trusted.
+	// Electron renderer uses file:// (packaged) or localhost (dev); no external origins are trusted.
+	// Packaged Electron loads via file:// which sends a "null" Origin header — must be explicitly allowed.
 	e.Use(echomw.CORSWithConfig(echomw.CORSConfig{
 		AllowOrigins: []string{
 			"http://localhost",
@@ -102,6 +103,7 @@ func main() {
 			"http://127.0.0.1",
 			"http://127.0.0.1:3000",
 			"http://127.0.0.1:8080",
+			"null", // packaged Electron renderer (file:// origin)
 		},
 		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
 		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
@@ -217,6 +219,9 @@ func main() {
 	// Sensitive-field reveal — system_admin only (adminRole is applied in addition to the group's frontDeskRole)
 	mem.GET("/:id/sensitive", memberHandler.RevealSensitiveFields, adminRole)
 	api.GET("/membership-tiers", memberHandler.ListTiers, authMW, frontDeskRole)
+	// Reminders endpoint: any authenticated role may call this so the tray can
+	// show membership expiry notifications regardless of the logged-in user's role.
+	api.GET("/reminders/memberships", memberHandler.GetMembershipReminders, authMW)
 
 	// Rate Tables & Charges (admin role)
 	rt := api.Group("/rate-tables", authMW, adminRole)

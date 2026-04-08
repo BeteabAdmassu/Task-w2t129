@@ -252,9 +252,12 @@ async function checkMembershipAndStock(opts: TrayOptions): Promise<void> {
     const token = await opts.getAuthToken();
     const authHeader = { Authorization: `Bearer ${token}` };
 
-    // Check members expiring soon.
+    // Check members expiring soon via the role-unrestricted reminders endpoint.
+    // Using /reminders/memberships instead of /members so any logged-in role
+    // (maintenance_tech, learning_coordinator, etc.) can receive notifications —
+    // not just front_desk/system_admin who have access to the full members list.
     const membersResp = await fetch(
-      `${opts.backendUrl}/api/v1/members?page=1&page_size=100`,
+      `${opts.backendUrl}/api/v1/reminders/memberships`,
       { headers: authHeader },
     );
     if (membersResp.ok) {
