@@ -4,6 +4,7 @@ import { skusAPI, inventoryAPI } from '../../services/api';
 import { useFetch } from '../../hooks/useFetch';
 import { useAuth } from '../../hooks/useAuth';
 import { useDraftAutoSave } from '../../hooks/useDraftAutoSave';
+import { DraftRecoveryDialog } from '../common/DraftRecoveryDialog';
 import type { SKU, InventoryBatch, PaginatedResponse } from '../../types';
 import LoadingSpinner from '../common/LoadingSpinner';
 import ErrorMessage from '../common/ErrorMessage';
@@ -205,8 +206,30 @@ const SKUListPage: React.FC = () => {
 
   if (loading && skus.length === 0) return <LoadingSpinner message="Loading SKUs..." />;
 
+  const handleSkuDraftRestore = (state: unknown) => {
+    const s = state as typeof createForm;
+    if (s && typeof s === 'object') {
+      setCreateForm({
+        name: (s as any).name || '',
+        ndc: (s as any).ndc || '',
+        upc: (s as any).upc || '',
+        description: (s as any).description || '',
+        unit_of_measure: (s as any).unit_of_measure || 'each',
+        low_stock_threshold: (s as any).low_stock_threshold ?? 10,
+        storage_location: (s as any).storage_location || '',
+        is_active: (s as any).is_active ?? true,
+      });
+      setShowCreate(true);
+    }
+  };
+
   return (
     <div>
+      <DraftRecoveryDialog
+        formType="sku_create"
+        onRestore={handleSkuDraftRestore}
+        onDiscard={clearSkuDraft}
+      />
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
         <h1 style={{ margin: 0, fontSize: '1.5rem', color: '#333' }}>SKU Management</h1>
         <button

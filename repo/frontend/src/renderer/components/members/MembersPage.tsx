@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { membersAPI } from '../../services/api';
 import { useFetch } from '../../hooks/useFetch';
 import { useDraftAutoSave } from '../../hooks/useDraftAutoSave';
+import { DraftRecoveryDialog } from '../common/DraftRecoveryDialog';
 import type { Member, MembershipTier, PaginatedResponse } from '../../types';
 import LoadingSpinner from '../common/LoadingSpinner';
 import ErrorMessage from '../common/ErrorMessage';
@@ -149,8 +150,25 @@ const MembersPage: React.FC = () => {
 
   const members = data?.data || [];
 
+  const handleMemberDraftRestore = (state: unknown) => {
+    if (!state || typeof state !== 'object') return;
+    const s = state as Record<string, unknown>;
+    setCreateForm({
+      name:      typeof s.name      === 'string' ? s.name      : '',
+      id_number: typeof s.id_number === 'string' ? s.id_number : '',
+      phone:     typeof s.phone     === 'string' ? s.phone     : '',
+      tier_id:   typeof s.tier_id   === 'string' ? s.tier_id   : '',
+    });
+    setShowCreate(true);
+  };
+
   return (
     <div style={{ padding: '1.5rem' }}>
+      <DraftRecoveryDialog
+        formType="member_create"
+        onRestore={handleMemberDraftRestore}
+        onDiscard={clearMemberDraft}
+      />
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
         <h2 style={{ margin: 0 }}>Members</h2>
         <button onClick={() => { setShowCreate(true); if (tiers && tiers.length > 0 && !createForm.tier_id) setCreateForm(f => ({ ...f, tier_id: tiers[0].id })); }} style={btnPrimary}>+ New Member</button>

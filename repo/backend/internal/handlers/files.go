@@ -22,9 +22,20 @@ import (
 	"medops/internal/repository"
 )
 
+// fileStore is the subset of repository.Repository used by FileHandler.
+// The interface enables unit testing without a real database.
+type fileStore interface {
+	GetFileByHash(hash string) (*models.ManagedFile, error)
+	GetFileByID(id string) (*models.ManagedFile, error)
+	GetFilesByIDs(ids []string) ([]models.ManagedFile, error)
+	CreateFile(f *models.ManagedFile) error
+	IsFileLinkedToUserWorkOrder(fileID, userID string) (bool, error)
+	CreateAuditLog(entry *models.AuditLogEntry) error
+}
+
 // FileHandler handles file management requests.
 type FileHandler struct {
-	repo    *repository.Repository
+	repo    fileStore
 	dataDir string
 }
 

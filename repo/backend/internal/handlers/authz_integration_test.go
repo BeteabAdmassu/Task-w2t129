@@ -9,6 +9,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +22,30 @@ import (
 	"medops/internal/middleware"
 	"medops/internal/models"
 )
+
+// ─── stub file store (F-003) ─────────────────────────────────────────────────
+
+// stubFileStore implements fileStore for testing FileHandler.Download
+// without a real database or filesystem (except for happy-path disk reads).
+type stubFileStore struct {
+	file          *models.ManagedFile // returned by GetFileByID
+	fileGetErr    error               // error returned by GetFileByID
+	linked        bool                // IsFileLinkedToUserWorkOrder result
+	linkedErr     error               // IsFileLinkedToUserWorkOrder error
+}
+
+func (s *stubFileStore) GetFileByID(_ string) (*models.ManagedFile, error) {
+	return s.file, s.fileGetErr
+}
+func (s *stubFileStore) IsFileLinkedToUserWorkOrder(_, _ string) (bool, error) {
+	return s.linked, s.linkedErr
+}
+func (s *stubFileStore) GetFileByHash(_ string) (*models.ManagedFile, error) { return nil, nil }
+func (s *stubFileStore) GetFilesByIDs(_ []string) ([]models.ManagedFile, error) {
+	return nil, nil
+}
+func (s *stubFileStore) CreateFile(_ *models.ManagedFile) error { return nil }
+func (s *stubFileStore) CreateAuditLog(_ *models.AuditLogEntry) error { return nil }
 
 // ─── stub store ──────────────────────────────────────────────────────────────
 
@@ -802,6 +827,209 @@ func TestCreateWorkOrder_ValidPriorities_AllAccepted(t *testing.T) {
 				t.Errorf("priority %q should yield 201; got %d — body: %s", priority, rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+// ─── F-003: Download handler secondary authorization tests ───────────────────
+//
+// F-003 added a secondary authorization path in the Download handler: when
+// canDownloadFile() returns false (primary check fails), the handler calls
+// repo.IsFileLinkedToUserWorkOrder. If that returns true, access is granted.
+//
+// These tests exercise the full Download handler code path with stub stores
+// so no real database or permanent filesystem is needed.
+
+// makeTestFile writes content to a temp file and returns its path.
+// The file is automatically cleaned up when t finishes.
+func makeTestFile(t *testing.T, content []byte) string {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "test-file.bin")
+	if err := os.WriteFile(p, content, 0644); err != nil {
+		t.Fatalf("makeTestFile: %v", err)
+	}
+	return p
+}
+
+// newDownloadCtx builds an echo.Context for a GET /files/:id request.
+func newDownloadCtx(fileID, userID, role string) (echo.Context, *httptest.ResponseRecorder) {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/files/"+fileID, nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set("user_id", userID)
+	c.Set("user_role", role)
+	c.SetParamNames("id")
+	c.SetParamValues(fileID)
+	return c, rec
+}
+
+// TestDownload_PrimaryAuth_Admin_Allowed verifies that system_admin bypasses both
+// primary and secondary checks and receives 200 when the file exists on disk.
+func TestDownload_PrimaryAuth_Admin_Allowed(t *testing.T) {
+	storagePath := makeTestFile(t, []byte("binary content"))
+	uploaderID := "uid-uploader"
+	mf := &models.ManagedFile{
+		ID:           "file-admin-01",
+		OriginalName: "report.pdf",
+		MimeType:     "application/pdf",
+		StoragePath:  storagePath,
+		UploadedBy:   &uploaderID,
+	}
+	h := &FileHandler{repo: &stubFileStore{file: mf}, dataDir: t.TempDir()}
+
+	c, rec := newDownloadCtx("file-admin-01", "uid-admin", "system_admin")
+	if err := h.Download(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("system_admin should get 200; got %d — body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestDownload_PrimaryAuth_Uploader_Allowed verifies that the original uploader
+// is granted access (primary check), regardless of role.
+func TestDownload_PrimaryAuth_Uploader_Allowed(t *testing.T) {
+	storagePath := makeTestFile(t, []byte("photo data"))
+	uploaderID := "uid-tech"
+	mf := &models.ManagedFile{
+		ID:           "file-uploader-01",
+		OriginalName: "photo.jpg",
+		MimeType:     "image/jpeg",
+		StoragePath:  storagePath,
+		UploadedBy:   &uploaderID,
+	}
+	h := &FileHandler{repo: &stubFileStore{file: mf}, dataDir: t.TempDir()}
+
+	c, rec := newDownloadCtx("file-uploader-01", "uid-tech", "maintenance_tech")
+	if err := h.Download(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("uploader should get 200; got %d — body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestDownload_SecondaryAuth_LinkedWO_Allowed verifies scenario (1): a non-uploader,
+// non-admin user who is linked to a work order containing this file gets 200.
+// This is the core F-003 secondary authorization path.
+func TestDownload_SecondaryAuth_LinkedWO_Allowed(t *testing.T) {
+	storagePath := makeTestFile(t, []byte("damage photo"))
+	uploaderID := "uid-different-user"
+	mf := &models.ManagedFile{
+		ID:           "file-linked-01",
+		OriginalName: "damage.jpg",
+		MimeType:     "image/jpeg",
+		StoragePath:  storagePath,
+		UploadedBy:   &uploaderID,
+	}
+	// Stub: primary check fails (different uploader), secondary returns linked=true
+	store := &stubFileStore{file: mf, linked: true}
+	h := &FileHandler{repo: store, dataDir: t.TempDir()}
+
+	// maintenance_tech who didn't upload but is assigned to the work order
+	c, rec := newDownloadCtx("file-linked-01", "uid-tech-assigned", "maintenance_tech")
+	if err := h.Download(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("secondary auth via WO link should give 200; got %d — body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestDownload_SecondaryAuth_NotLinkedWO_Denied verifies scenario (2): a non-uploader,
+// non-admin user with no linked work order photo receives 403.
+// Both primary and secondary checks must fail for the deny to fire.
+func TestDownload_SecondaryAuth_NotLinkedWO_Denied(t *testing.T) {
+	uploaderID := "uid-uploader"
+	mf := &models.ManagedFile{
+		ID:          "file-notlinked-01",
+		OriginalName: "document.pdf",
+		MimeType:    "application/pdf",
+		StoragePath: "/nonexistent/path.pdf", // won't be reached — auth fails first
+		UploadedBy:  &uploaderID,
+	}
+	// Stub: primary check fails (different user), secondary returns linked=false
+	store := &stubFileStore{file: mf, linked: false}
+	h := &FileHandler{repo: store, dataDir: t.TempDir()}
+
+	c, rec := newDownloadCtx("file-notlinked-01", "uid-stranger", "front_desk")
+	if err := h.Download(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("non-linked user should get 403; got %d — body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestDownload_SecondaryAuth_LinkCheckError_Denied verifies scenario (4): when
+// IsFileLinkedToUserWorkOrder returns an error, the handler logs the error and
+// defaults to deny (does NOT grant access on error).
+func TestDownload_SecondaryAuth_LinkCheckError_Denied(t *testing.T) {
+	uploaderID := "uid-uploader"
+	mf := &models.ManagedFile{
+		ID:          "file-linkerr-01",
+		OriginalName: "doc.pdf",
+		MimeType:    "application/pdf",
+		StoragePath: "/nonexistent/path.pdf",
+		UploadedBy:  &uploaderID,
+	}
+	// Stub: secondary check returns an error (db outage scenario)
+	store := &stubFileStore{
+		file:      mf,
+		linked:    false, // error path must not grant access
+		linkedErr: fmt.Errorf("simulated db error"),
+	}
+	h := &FileHandler{repo: store, dataDir: t.TempDir()}
+
+	c, rec := newDownloadCtx("file-linkerr-01", "uid-stranger", "front_desk")
+	if err := h.Download(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// On error, the handler logs a warning and falls through to the deny branch
+	// (linked is still false after the error, so !linked → 403).
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("linkage error should default to 403 deny; got %d — body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestDownload_SecondaryAuth_InventoryPharmacist_Allowed verifies that
+// inventory_pharmacist is covered by the primary check (blanket access).
+func TestDownload_SecondaryAuth_InventoryPharmacist_Allowed(t *testing.T) {
+	storagePath := makeTestFile(t, []byte("label data"))
+	someUploader := "uid-other"
+	mf := &models.ManagedFile{
+		ID:           "file-pharm-01",
+		OriginalName: "label.pdf",
+		MimeType:     "application/pdf",
+		StoragePath:  storagePath,
+		UploadedBy:   &someUploader,
+	}
+	// Secondary check never needed — primary grants access for inventory_pharmacist
+	store := &stubFileStore{file: mf, linked: false}
+	h := &FileHandler{repo: store, dataDir: t.TempDir()}
+
+	c, rec := newDownloadCtx("file-pharm-01", "uid-pharm", "inventory_pharmacist")
+	if err := h.Download(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("inventory_pharmacist should get 200; got %d — body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestDownload_FileNotFound_Returns404 verifies that a missing file record
+// yields 404 before authorization is even checked.
+func TestDownload_FileNotFound_Returns404(t *testing.T) {
+	store := &stubFileStore{file: nil} // GetFileByID returns nil
+	h := &FileHandler{repo: store, dataDir: t.TempDir()}
+
+	c, rec := newDownloadCtx("file-missing", "uid-admin", "system_admin")
+	if err := h.Download(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("missing file should get 404; got %d", rec.Code)
 	}
 }
 

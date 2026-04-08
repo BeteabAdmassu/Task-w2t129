@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { learningAPI } from '../../services/api';
 import { useFetch } from '../../hooks/useFetch';
 import { useDraftAutoSave } from '../../hooks/useDraftAutoSave';
+import { DraftRecoveryDialog } from '../common/DraftRecoveryDialog';
 import type { LearningSubject, LearningChapter, KnowledgePoint, PaginatedResponse } from '../../types';
 import LoadingSpinner from '../common/LoadingSpinner';
 import ErrorMessage from '../common/ErrorMessage';
@@ -53,6 +54,8 @@ const LearningPage: React.FC = () => {
   const [chapterFormErr, setChapterFormErr] = useState('');
   const [chapterSubmitting, setChapterSubmitting] = useState(false);
   const [chapterSuccess, setChapterSuccess] = useState('');
+  // Draft auto-save: chapter form is scoped to the selected subject
+  const { clearDraft: clearChapterDraft } = useDraftAutoSave('learning_chapter', selectedSubject?.id ?? null, chapterForm);
 
   // Knowledge Points
   const [kps, setKps] = useState<KnowledgePoint[]>([]);
@@ -66,6 +69,12 @@ const LearningPage: React.FC = () => {
   const [kpFormErr, setKpFormErr] = useState('');
   const [kpSubmitting, setKpSubmitting] = useState(false);
   const [kpSuccess, setKpSuccess] = useState('');
+  // Draft auto-save: KP form uses editingKp id for edits, chapter id for new KPs
+  const { clearDraft: clearKpDraft } = useDraftAutoSave(
+    'learning_kp',
+    editingKp?.id ?? selectedChapter?.id ?? null,
+    kpForm,
+  );
 
   // Search
   const [searchQuery, setSearchQuery] = useState('');
@@ -164,6 +173,7 @@ const LearningPage: React.FC = () => {
     try {
       await learningAPI.createChapter({ subject_id: selectedSubject.id, name: chapterForm.name.trim(), sort_order: chapterForm.sort_order });
       setChapterSuccess('Chapter created successfully');
+      clearChapterDraft();
       setShowChapterForm(false);
       setChapterForm({ name: '', sort_order: 0 });
       // refetch chapters
@@ -212,6 +222,7 @@ const LearningPage: React.FC = () => {
         await learningAPI.createKnowledgePoint({ chapter_id: selectedChapter!.id, title: kpForm.title.trim(), content: kpForm.content, tags, classifications });
       }
       setKpSuccess(editingKp ? 'Knowledge point updated' : 'Knowledge point created');
+      clearKpDraft();
       setShowKpForm(false);
       fetchKps(kpPage);
       setTimeout(() => setKpSuccess(''), 3000);
@@ -283,8 +294,71 @@ const LearningPage: React.FC = () => {
   const displayTotal = searchResults !== null ? searchTotal : kpTotal;
   const displayPage = searchResults !== null ? searchPage : kpPage;
 
+  const handleSubjectDraftRestore = (state: unknown) => {
+    const s = state as typeof subjectForm;
+    if (s && typeof s === 'object') {
+      setSubjectForm({
+        name: (s as any).name || '',
+        description: (s as any).description || '',
+        sort_order: (s as any).sort_order ?? 0,
+      });
+      setShowSubjectForm(true);
+    }
+  };
+
+  const handleChapterDraftRestore = (state: unknown) => {
+    const s = state as typeof chapterForm;
+    if (s && typeof s === 'object') {
+      setChapterForm({
+        name: (s as any).name || '',
+        sort_order: (s as any).sort_order ?? 0,
+      });
+      setShowChapterForm(true);
+    }
+  };
+
+  const handleKpDraftRestore = (state: unknown) => {
+    const s = state as typeof kpForm;
+    if (s && typeof s === 'object') {
+      setKpForm({
+        title: (s as any).title || '',
+        content: (s as any).content || '',
+        tags: (s as any).tags || '',
+        classifications: (s as any).classifications || '{}',
+      });
+      setEditingKp(null);
+      setShowKpForm(true);
+    }
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* Draft recovery — subject form (always active) */}
+      <DraftRecoveryDialog
+        formType="learning_subject"
+        onRestore={handleSubjectDraftRestore}
+        onDiscard={clearSubjectDraft}
+      />
+      {/* Draft recovery — chapter form (scoped to selected subject) */}
+      {selectedSubject && (
+        <DraftRecoveryDialog
+          key={`chapter-draft-${selectedSubject.id}`}
+          formType="learning_chapter"
+          formId={selectedSubject.id}
+          onRestore={handleChapterDraftRestore}
+          onDiscard={clearChapterDraft}
+        />
+      )}
+      {/* Draft recovery — KP create form (scoped to selected chapter, not when editing) */}
+      {selectedChapter && !editingKp && (
+        <DraftRecoveryDialog
+          key={`kp-draft-${selectedChapter.id}`}
+          formType="learning_kp"
+          formId={selectedChapter.id}
+          onRestore={handleKpDraftRestore}
+          onDiscard={clearKpDraft}
+        />
+      )}
       {/* Top bar */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '1rem', borderBottom: '1px solid #ddd', flexWrap: 'wrap' }}>
         <h2 style={{ margin: 0, marginRight: 'auto' }}>Knowledge Base</h2>

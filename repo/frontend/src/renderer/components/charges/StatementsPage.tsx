@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { chargesAPI } from '../../services/api';
 import { useDraftAutoSave } from '../../hooks/useDraftAutoSave';
+import { DraftRecoveryDialog } from '../common/DraftRecoveryDialog';
 import type { ChargeStatement, ChargeLineItem, User } from '../../types';
 import LoadingSpinner from '../common/LoadingSpinner';
 import ErrorMessage from '../common/ErrorMessage';
@@ -239,8 +240,24 @@ const StatementsPage: React.FC = () => {
     { key: 'total', header: 'Total', render: (li: ChargeLineItem) => <strong>${li.total.toFixed(2)}</strong> },
   ];
 
+  const handleGenDraftRestore = (state: unknown) => {
+    const s = state as typeof genForm;
+    if (s && typeof s === 'object') {
+      setGenForm({
+        period_start: (s as any).period_start || '',
+        period_end: (s as any).period_end || '',
+      });
+      setShowGenerate(true);
+    }
+  };
+
   return (
     <div style={{ padding: '1.5rem' }}>
+      <DraftRecoveryDialog
+        formType="statement_generate"
+        onRestore={handleGenDraftRestore}
+        onDiscard={clearGenDraft}
+      />
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
         <h2 style={{ margin: 0 }}>Statements</h2>
         <button onClick={() => setShowGenerate(true)} style={btnPrimary}>+ Generate Statement</button>

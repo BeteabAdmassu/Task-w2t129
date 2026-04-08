@@ -2,6 +2,8 @@ import React, { useState, useEffect, FormEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { skusAPI, inventoryAPI } from '../../services/api';
 import { useFetch } from '../../hooks/useFetch';
+import { useDraftAutoSave } from '../../hooks/useDraftAutoSave';
+import { DraftRecoveryDialog } from '../common/DraftRecoveryDialog';
 import type { SKU, InventoryBatch, StockTransaction, PaginatedResponse } from '../../types';
 import LoadingSpinner from '../common/LoadingSpinner';
 import ErrorMessage from '../common/ErrorMessage';
@@ -77,6 +79,8 @@ const SKUDetailPage: React.FC = () => {
   const [receiveErrors, setReceiveErrors] = useState<Record<string, string>>({});
   const [receiveLoading, setReceiveLoading] = useState(false);
   const [receiveSuccess, setReceiveSuccess] = useState('');
+  // Draft auto-save: preserves in-progress receive entry if the page is closed unexpectedly
+  const { clearDraft: clearReceiveDraft } = useDraftAutoSave('sku_receive', id ?? null, receiveForm);
 
   // Dispense form
   const [dispenseForm, setDispenseForm] = useState({
@@ -85,6 +89,8 @@ const SKUDetailPage: React.FC = () => {
   const [dispenseErrors, setDispenseErrors] = useState<Record<string, string>>({});
   const [dispenseLoading, setDispenseLoading] = useState(false);
   const [dispenseSuccess, setDispenseSuccess] = useState('');
+  // Draft auto-save: preserves in-progress dispense entry if the page is closed unexpectedly
+  const { clearDraft: clearDispenseDraft } = useDraftAutoSave('sku_dispense', id ?? null, dispenseForm);
 
   // Set default batch when batches load
   useEffect(() => {
@@ -117,6 +123,7 @@ const SKUDetailPage: React.FC = () => {
         reason_code: receiveForm.reason_code,
       });
       setReceiveSuccess(`Received ${receiveForm.quantity} units successfully`);
+      clearReceiveDraft();
       setReceiveForm({ lot_number: '', expiration_date: '', quantity: 1, reason_code: REASON_CODES_IN[0] });
       setReceiveErrors({});
       refetchBatches();
@@ -156,6 +163,7 @@ const SKUDetailPage: React.FC = () => {
         prescription_id: dispenseForm.prescription_id.trim() || undefined,
       });
       setDispenseSuccess(`Dispensed ${dispenseForm.quantity} units successfully`);
+      clearDispenseDraft();
       setDispenseForm((p) => ({ ...p, quantity: 1, prescription_id: '' }));
       setDispenseErrors({});
       refetchBatches();
@@ -215,8 +223,46 @@ const SKUDetailPage: React.FC = () => {
     { key: 'created_at', header: 'Date', sortable: true, render: (t: StockTransaction) => new Date(t.created_at).toLocaleString() },
   ];
 
+  const handleReceiveDraftRestore = (state: unknown) => {
+    const s = state as typeof receiveForm;
+    if (s && typeof s === 'object') {
+      setReceiveForm({
+        lot_number: (s as any).lot_number || '',
+        expiration_date: (s as any).expiration_date || '',
+        quantity: (s as any).quantity ?? 1,
+        reason_code: (s as any).reason_code || REASON_CODES_IN[0],
+      });
+    }
+  };
+
+  const handleDispenseDraftRestore = (state: unknown) => {
+    const s = state as typeof dispenseForm;
+    if (s && typeof s === 'object') {
+      setDispenseForm((p) => ({
+        ...p,
+        quantity: (s as any).quantity ?? 1,
+        reason_code: (s as any).reason_code || REASON_CODES_OUT[0],
+        prescription_id: (s as any).prescription_id || '',
+        // batch_id comes from live batch data; keep existing selection
+      }));
+    }
+  };
+
   return (
     <div>
+      {/* Draft recovery dialogs for inline receive/dispense forms */}
+      <DraftRecoveryDialog
+        formType="sku_receive"
+        formId={id}
+        onRestore={handleReceiveDraftRestore}
+        onDiscard={clearReceiveDraft}
+      />
+      <DraftRecoveryDialog
+        formType="sku_dispense"
+        formId={id}
+        onRestore={handleDispenseDraftRestore}
+        onDiscard={clearDispenseDraft}
+      />
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1.5rem' }}>
         <button

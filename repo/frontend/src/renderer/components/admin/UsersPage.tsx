@@ -2,6 +2,7 @@ import React, { useState, FormEvent, useEffect } from 'react';
 import { usersAPI } from '../../services/api';
 import { useFetch } from '../../hooks/useFetch';
 import { useDraftAutoSave } from '../../hooks/useDraftAutoSave';
+import { DraftRecoveryDialog } from '../common/DraftRecoveryDialog';
 import type { User } from '../../types';
 import LoadingSpinner from '../common/LoadingSpinner';
 import ErrorMessage from '../common/ErrorMessage';
@@ -196,11 +197,28 @@ const UsersPage: React.FC = () => {
     boxSizing: 'border-box',
   });
 
+  const handleUserDraftRestore = (state: unknown) => {
+    const s = state as typeof createForm;
+    if (s && typeof s === 'object') {
+      setCreateForm({
+        username: (s as any).username || '',
+        password: (s as any).password || '',
+        role: (s as any).role || ROLES[0],
+      });
+      setShowCreate(true);
+    }
+  };
+
   if (loading) return <LoadingSpinner message="Loading users..." />;
   if (error) return <ErrorMessage message={error} onRetry={refetch} />;
 
   return (
     <div>
+      <DraftRecoveryDialog
+        formType="user_create"
+        onRestore={handleUserDraftRestore}
+        onDiscard={clearUserDraft}
+      />
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
         <h1 style={{ margin: 0, fontSize: '1.5rem', color: '#333' }}>User Management</h1>
         <button

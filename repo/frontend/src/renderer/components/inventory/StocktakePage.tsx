@@ -2,6 +2,8 @@ import React, { useState, useEffect, FormEvent } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { stocktakeAPI } from '../../services/api';
 import { useFetch } from '../../hooks/useFetch';
+import { useDraftAutoSave } from '../../hooks/useDraftAutoSave';
+import { DraftRecoveryDialog } from '../common/DraftRecoveryDialog';
 import type { Stocktake, StocktakeLine } from '../../types';
 import LoadingSpinner from '../common/LoadingSpinner';
 import ErrorMessage from '../common/ErrorMessage';
@@ -57,6 +59,10 @@ const StocktakeCreateAndList: React.FC = () => {
   const [createErrors, setCreateErrors] = useState<Record<string, string>>({});
   const [createLoading, setCreateLoading] = useState(false);
   const [createSuccess, setCreateSuccess] = useState('');
+  // Draft auto-save: preserves period dates if the page is closed before submit
+  const { clearDraft: clearStocktakeDraft } = useDraftAutoSave(
+    'stocktake_create', null, { period_start: periodStart, period_end: periodEnd },
+  );
 
   // List of recent stocktakes (we don't have a list endpoint in the API, so we'll show the create form prominently)
   // We'll use a simple state to track recently created stocktakes
@@ -84,6 +90,7 @@ const StocktakeCreateAndList: React.FC = () => {
       const res = await stocktakeAPI.create({ period_start: periodStart, period_end: periodEnd });
       const newStocktake = res.data;
       setCreateSuccess('Stocktake created successfully');
+      clearStocktakeDraft();
       setPeriodStart('');
       setPeriodEnd('');
       setCreateErrors({});
@@ -98,8 +105,21 @@ const StocktakeCreateAndList: React.FC = () => {
     }
   };
 
+  const handleStocktakeDraftRestore = (state: unknown) => {
+    const s = state as { period_start?: string; period_end?: string };
+    if (s && typeof s === 'object') {
+      if ((s as any).period_start) setPeriodStart((s as any).period_start);
+      if ((s as any).period_end) setPeriodEnd((s as any).period_end);
+    }
+  };
+
   return (
     <div>
+      <DraftRecoveryDialog
+        formType="stocktake_create"
+        onRestore={handleStocktakeDraftRestore}
+        onDiscard={clearStocktakeDraft}
+      />
       <h1 style={{ margin: '0 0 1.5rem', fontSize: '1.5rem', color: '#333' }}>Stocktakes</h1>
 
       {/* Create form */}

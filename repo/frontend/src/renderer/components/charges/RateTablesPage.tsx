@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { chargesAPI } from '../../services/api';
 import { useDraftAutoSave } from '../../hooks/useDraftAutoSave';
+import { DraftRecoveryDialog } from '../common/DraftRecoveryDialog';
 import type { RateTable } from '../../types';
 import LoadingSpinner from '../common/LoadingSpinner';
 import ErrorMessage from '../common/ErrorMessage';
@@ -156,8 +157,28 @@ const RateTablesPage: React.FC = () => {
   // Expand row to show tiers
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
+  const handleRateDraftRestore = (state: unknown) => {
+    const s = state as typeof form;
+    if (s && typeof s === 'object') {
+      setForm({
+        name: (s as any).name || '',
+        type: (s as any).type || 'distance',
+        tiers: (s as any).tiers || '[{"min": 0, "max": 10, "rate": 5}]',
+        fuel_surcharge_pct: (s as any).fuel_surcharge_pct || '0',
+        taxable: !!(s as any).taxable,
+        effective_date: (s as any).effective_date || '',
+      });
+      setShowCreate(true);
+    }
+  };
+
   return (
     <div style={{ padding: '1.5rem' }}>
+      <DraftRecoveryDialog
+        formType="rate_table_create"
+        onRestore={handleRateDraftRestore}
+        onDiscard={clearRateDraft}
+      />
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
         <h2 style={{ margin: 0 }}>Rate Tables</h2>
         <div style={{ display: 'flex', gap: '0.5rem' }}>

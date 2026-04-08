@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { workOrdersAPI, filesAPI } from '../../services/api';
 import { useAuth } from '../../hooks/useAuth';
+import { useDraftAutoSave } from '../../hooks/useDraftAutoSave';
+import { DraftRecoveryDialog } from '../common/DraftRecoveryDialog';
 import type { WorkOrder, ManagedFile } from '../../types';
 import LoadingSpinner from '../common/LoadingSpinner';
 import ErrorMessage from '../common/ErrorMessage';
@@ -48,6 +50,8 @@ const WorkOrderDetailPage: React.FC = () => {
   const [showCloseForm, setShowCloseForm] = useState(false);
   const [closeForm, setCloseForm] = useState({ parts_cost: '', labor_cost: '' });
   const [closeErr, setCloseErr] = useState('');
+  // Draft auto-save: preserves parts/labor cost entries if the page is closed before submitting
+  const { clearDraft: clearCloseDraft } = useDraftAutoSave('wo_close', id ?? null, closeForm);
 
   // Rating
   const [rating, setRating] = useState(0);
@@ -110,6 +114,7 @@ const WorkOrderDetailPage: React.FC = () => {
     try {
       await workOrdersAPI.close(order.id, { parts_cost: parts, labor_cost: labor });
       showSuccess('Work order closed');
+      clearCloseDraft();
       setShowCloseForm(false);
       fetchOrder();
     } catch (e: any) {
@@ -171,8 +176,25 @@ const WorkOrderDetailPage: React.FC = () => {
   const currentStepIndex = statusSteps.indexOf(order.status);
   const isMaintenance = user?.role === 'maintenance_tech' || user?.role === 'system_admin';
 
+  const handleCloseDraftRestore = (state: unknown) => {
+    const s = state as typeof closeForm;
+    if (s && typeof s === 'object') {
+      setCloseForm({
+        parts_cost: (s as any).parts_cost || '',
+        labor_cost: (s as any).labor_cost || '',
+      });
+      setShowCloseForm(true);
+    }
+  };
+
   return (
     <div style={{ padding: '1.5rem', maxWidth: 900, margin: '0 auto' }}>
+      <DraftRecoveryDialog
+        formType="wo_close"
+        formId={id}
+        onRestore={handleCloseDraftRestore}
+        onDiscard={clearCloseDraft}
+      />
       <button onClick={() => navigate('/work-orders')} style={{ ...btnSecondary, marginBottom: '1rem' }}>
         &larr; Back to Work Orders
       </button>

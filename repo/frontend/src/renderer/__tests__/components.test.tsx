@@ -45,6 +45,13 @@ const mockFilesUpload = vi.hoisted(() => vi.fn());
 const mockWorkOrdersLinkPhoto = vi.hoisted(() => vi.fn());
 
 vi.mock('../services/api', () => ({
+  // Default export: the raw axios instance used directly by DraftRecoveryDialog.
+  // Reject with 404 so the dialog silently does nothing (no draft = no UI).
+  default: {
+    get: vi.fn().mockRejectedValue({ response: { status: 404 } }),
+    put: vi.fn().mockResolvedValue({ data: {} }),
+    delete: vi.fn().mockResolvedValue({ data: {} }),
+  },
   authAPI: {
     login: vi.fn(),
     logout: vi.fn(),
