@@ -292,18 +292,21 @@ async function checkMembershipAndStock(opts: TrayOptions): Promise<void> {
       }
     }
 
-    // Check low-stock SKUs.
+    // Check low-stock SKUs via the role-unrestricted reminder endpoint.
+    // Using /reminders/low-stock instead of /skus/low-stock so any logged-in role
+    // (front_desk, maintenance_tech, etc.) receives the alert — not just
+    // inventory_pharmacist/system_admin who have access to the full SKU endpoint.
     const stockResp = await fetch(
-      `${opts.backendUrl}/api/v1/skus/low-stock`,
+      `${opts.backendUrl}/api/v1/reminders/low-stock`,
       { headers: authHeader },
     );
     if (stockResp.ok) {
       const stockPayload = await stockResp.json();
-      const items: unknown[] = stockPayload.data ?? stockPayload ?? [];
-      if (Array.isArray(items) && items.length > 0) {
+      const count: number = stockPayload.count ?? 0;
+      if (count > 0) {
         fireNotification(
           'Low Stock Alert',
-          `${items.length} SKU(s) are below low-stock threshold`,
+          `${count} SKU(s) are below low-stock threshold`,
           opts.onOpen,
         );
       }

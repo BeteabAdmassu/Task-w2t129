@@ -550,11 +550,12 @@ if echo "$CREATE_RT" | jq -e '.id' > /dev/null 2>&1; then
 else
     fail "Create rate table" "$CREATE_RT"
 fi
+RT_ID=$(echo "$CREATE_RT" | jq -r '.id // empty')
 
-# Generate statement
+# Generate statement — must include rate_table_id and line_items (handler requires both)
 GEN_STMT=$(curl -sf -X POST "${API_URL}/statements/generate" \
     -H "$AUTH_HEADER" -H "Content-Type: application/json" \
-    -d '{"period_start":"2026-01-01","period_end":"2026-01-31"}')
+    -d "{\"period_start\":\"2026-01-01\",\"period_end\":\"2026-01-31\",\"rate_table_id\":\"${RT_ID}\",\"line_items\":[{\"description\":\"Supply transport\",\"quantity\":5}]}")
 STMT_ID=$(echo "$GEN_STMT" | jq -r '.statement.id // empty')
 if [ -n "$STMT_ID" ]; then
     pass "Generate charge statement"

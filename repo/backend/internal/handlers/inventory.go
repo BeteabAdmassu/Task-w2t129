@@ -284,6 +284,33 @@ func (h *InventoryHandler) GetLowStock(c echo.Context) error {
 	})
 }
 
+// GetLowStockReminder returns a minimal low-stock summary for system tray notifications.
+// Unlike GetLowStock (which requires inventory role), this endpoint is accessible to
+// any authenticated user so tray alerts fire regardless of which role is logged in.
+// Only id and name are returned — no pricing, location, or batch detail.
+func (h *InventoryHandler) GetLowStockReminder(c echo.Context) error {
+	skus, err := h.repo.GetLowStockSKUs()
+	if err != nil {
+		logrus.WithError(err).Error("Failed to get low stock SKUs for reminder")
+		return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error: "Failed to retrieve low stock data",
+			Code:  http.StatusInternalServerError,
+		})
+	}
+	type item struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	items := make([]item, 0, len(skus))
+	for _, s := range skus {
+		items = append(items, item{ID: s.ID, Name: s.Name})
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"count": len(items),
+		"data":  items,
+	})
+}
+
 // Receive handles inventory receipt (stock in).
 func (h *InventoryHandler) Receive(c echo.Context) error {
 	var req models.ReceiveRequest

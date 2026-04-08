@@ -536,7 +536,7 @@ All endpoints served locally at `http://localhost:<port>/api/v1`. Auth via sessi
 Do NOT build these:
 - No internet/cloud connectivity or sync
 - No email or SMS notifications (offline system — tray notifications only)
-- No multi-site or multi-tenant support
+- No multi-site support (single-clinic deployment only); the codebase uses a `tenant_id` column internally for data isolation within a single deployment, not for multi-tenant SaaS hosting
 - No payment gateway integration (charges are recorded offline)
 - No barcode/QR scanning hardware integration (manual entry of NDC/UPC)
 - No report generation beyond what's needed for export (CSV/JSON/ZIP)

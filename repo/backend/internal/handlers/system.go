@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"archive/zip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -163,6 +165,27 @@ func (h *SystemHandler) restoreArtifacts(artifactDir string) error {
 			return fmt.Errorf("restore %s artifacts: %w", sub, err)
 		}
 	}
+	return nil
+}
+
+// promoteArtifacts atomically replaces activeDir with the staged artifact tree.
+// It first attempts os.Rename (atomic on same filesystem); if that fails (e.g.
+// cross-device), it falls back to a recursive copy then removes the staging dir.
+// Returns an error if both strategies fail — callers must treat this as fatal and
+// must NOT proceed to success finalization.
+func (h *SystemHandler) promoteArtifacts(stagingDir string) error {
+	active := h.activeDir()
+	if err := os.RemoveAll(active); err != nil {
+		return fmt.Errorf("clear activeDir before promotion: %w", err)
+	}
+	if err := os.Rename(stagingDir, active); err == nil {
+		return nil // fast path: rename succeeded
+	}
+	// Cross-device fallback: copy then clean up staging.
+	if copyErr := copyDir(stagingDir, active); copyErr != nil {
+		return fmt.Errorf("rename failed and copy fallback failed: %w", copyErr)
+	}
+	os.RemoveAll(stagingDir)
 	return nil
 }
 
@@ -388,18 +411,43 @@ func extractPackageVersion(dir, fallback string) string {
 }
 
 // extractZIPToDir extracts .sql files from a ZIP archive into destDir.
+// Path traversal protection: entry names are flattened to base filename only;
+// absolute paths, ".." components, and symlinks are explicitly rejected.
 func extractZIPToDir(zipPath, destDir string) error {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return fmt.Errorf("open zip: %w", err)
 	}
 	defer r.Close()
+
+	// Resolve destDir to absolute canonical path for boundary checks.
+	absDestDir, err := filepath.Abs(destDir)
+	if err != nil {
+		return fmt.Errorf("resolve dest dir: %w", err)
+	}
+
 	for _, f := range r.File {
 		if f.FileInfo().IsDir() {
 			continue
 		}
 		if strings.ToLower(filepath.Ext(f.Name)) != ".sql" {
 			continue
+		}
+		// Reject symlinks — they can escape the directory boundary.
+		if f.FileInfo().Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symlink rejected in update package: %s", f.Name)
+		}
+		// Reject absolute paths and ".." traversal before any path join.
+		normalised := filepath.ToSlash(f.Name)
+		if filepath.IsAbs(normalised) || strings.Contains(normalised, "..") {
+			return fmt.Errorf("unsafe path in update package: %s", f.Name)
+		}
+		// Flatten to base filename — no subdirectory structure in the SQL staging dir.
+		dest := filepath.Join(destDir, filepath.Base(f.Name))
+		// Canonical boundary check: final destination must remain under destDir.
+		absDest, err := filepath.Abs(dest)
+		if err != nil || !strings.HasPrefix(absDest, absDestDir+string(filepath.Separator)) {
+			return fmt.Errorf("path traversal rejected: %s", f.Name)
 		}
 		rc, err := f.Open()
 		if err != nil {
@@ -410,7 +458,6 @@ func extractZIPToDir(zipPath, destDir string) error {
 		if err != nil {
 			return fmt.Errorf("read entry %s: %w", f.Name, err)
 		}
-		dest := filepath.Join(destDir, filepath.Base(f.Name))
 		if err := os.WriteFile(dest, data, 0644); err != nil {
 			return fmt.Errorf("write %s: %w", filepath.Base(f.Name), err)
 		}
@@ -418,23 +465,82 @@ func extractZIPToDir(zipPath, destDir string) error {
 	return nil
 }
 
+// packageManifest is the optional manifest.json an update package may include
+// to provide per-file SHA-256 checksums.  When present, every listed file is
+// verified before being written to disk.
+type packageManifest struct {
+	Version   string            `json:"version"`
+	Checksums map[string]string `json:"checksums"` // normalised slash-path → sha256 hex
+}
+
 // extractZIPArtifacts extracts the backend/ and frontend/ subtrees from a ZIP
 // package into activeDir.  Files outside those two subdirectories are ignored.
-// This is what installs new application binaries and frontend assets when an
-// offline update package is applied.
+//
+// Security hardening (H-01):
+//   - Entry names are normalised and checked for absolute paths and ".." traversal.
+//   - The final destination path is resolved to an absolute canonical path and
+//     verified to remain under activeDir before any write.
+//   - Symlink entries are rejected outright.
+//
+// Integrity verification (medium):
+//   - If the ZIP contains a manifest.json with a "checksums" map, each listed
+//     file's SHA-256 is verified against the manifest before writing.
 func extractZIPArtifacts(zipPath, activeDir string) error {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return fmt.Errorf("open zip: %w", err)
 	}
 	defer r.Close()
+
+	// Resolve activeDir once to its absolute canonical path.
+	absActiveDir, err := filepath.Abs(activeDir)
+	if err != nil {
+		return fmt.Errorf("resolve active dir: %w", err)
+	}
+	// Ensure the boundary prefix always ends with a separator so that a dir
+	// named "active-evil/" cannot spoof a prefix check against "active/".
+	activeBoundary := absActiveDir + string(filepath.Separator)
+
+	// First pass: locate and parse manifest.json if present.
+	var mf *packageManifest
 	for _, f := range r.File {
-		// Normalise separators for prefix matching.
+		if filepath.ToSlash(f.Name) == "manifest.json" {
+			rc, openErr := f.Open()
+			if openErr != nil {
+				return fmt.Errorf("open manifest.json: %w", openErr)
+			}
+			var m packageManifest
+			decodeErr := json.NewDecoder(rc).Decode(&m)
+			rc.Close()
+			if decodeErr != nil {
+				return fmt.Errorf("parse manifest.json: %w", decodeErr)
+			}
+			mf = &m
+			break
+		}
+	}
+
+	// Second pass: extract and verify backend/ and frontend/ entries.
+	for _, f := range r.File {
+		// Normalise separators for consistent prefix matching.
 		name := filepath.ToSlash(f.Name)
 		if !strings.HasPrefix(name, "backend/") && !strings.HasPrefix(name, "frontend/") {
 			continue
 		}
+		// Reject symlinks — they can escape the canonical boundary check.
+		if f.FileInfo().Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symlink rejected in update package: %s", f.Name)
+		}
+		// Reject absolute paths and ".." components before any path join.
+		if filepath.IsAbs(name) || strings.Contains(name, "..") {
+			return fmt.Errorf("unsafe path in update package: %s", f.Name)
+		}
 		dest := filepath.Join(activeDir, filepath.FromSlash(name))
+		// Canonical boundary check: destination must remain under activeDir.
+		absDest, absErr := filepath.Abs(dest)
+		if absErr != nil || !strings.HasPrefix(absDest, activeBoundary) {
+			return fmt.Errorf("path traversal rejected: %s", f.Name)
+		}
 		if f.FileInfo().IsDir() {
 			_ = os.MkdirAll(dest, 0755)
 			continue
@@ -447,6 +553,16 @@ func extractZIPArtifacts(zipPath, activeDir string) error {
 		rc.Close()
 		if err != nil {
 			return fmt.Errorf("read %s: %w", f.Name, err)
+		}
+		// Verify SHA-256 when manifest is present and lists this entry.
+		if mf != nil && mf.Checksums != nil {
+			if expected, listed := mf.Checksums[name]; listed {
+				h := sha256.Sum256(data)
+				got := hex.EncodeToString(h[:])
+				if got != strings.ToLower(expected) {
+					return fmt.Errorf("checksum mismatch for %s: got %s want %s", f.Name, got, expected)
+				}
+			}
 		}
 		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 			return err
@@ -580,28 +696,65 @@ func (h *SystemHandler) ApplyUpdate(c echo.Context) error {
 		artifactDir = ""
 	}
 
-	// ── Install new application artifacts from ZIP ────────────────────────────
-	// Extract backend/ and frontend/ subdirectories from the uploaded ZIP into
-	// DATA_DIR/active/ so Electron picks them up on next launch.
+	// ── Stage new application artifacts (do NOT write to activeDir yet) ─────────
+	// Artifacts are extracted to a private staging directory so that activeDir is
+	// never partially mutated.  The staged tree is only promoted to activeDir after
+	// the SQL transaction has committed successfully — keeping schema and binaries
+	// always in sync (H-02 full fix).
+	var artifactStagingDir string
 	if tmpZip != "" {
-		if err := extractZIPArtifacts(tmpZip, h.activeDir()); err != nil {
-			logrus.WithError(err).Warn("Failed to extract application artifacts from package; SQL migrations will still be applied")
+		artifactStagingDir = filepath.Join(h.dataDir, "updates", "artifact_staging_"+timestamp)
+		if err := os.MkdirAll(artifactStagingDir, 0755); err != nil {
+			os.Remove(tmpZip)
+			return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error: "Failed to create artifact staging directory",
+				Code:  http.StatusInternalServerError,
+			})
+		}
+		if err := extractZIPArtifacts(tmpZip, artifactStagingDir); err != nil {
+			os.Remove(tmpZip)
+			os.RemoveAll(artifactStagingDir)
+			logrus.WithError(err).Error("Artifact staging failed; aborting update — activeDir unchanged")
+			return c.JSON(http.StatusBadRequest, models.ErrorResponse{
+				Error:   "Failed to stage application artifacts; update aborted",
+				Code:    http.StatusBadRequest,
+				Details: err.Error(),
+			})
 		}
 		os.Remove(tmpZip)
 	}
 
-	// ── Apply SQL migrations ──────────────────────────────────────────────────
+	// ── Apply SQL migrations (atomic transaction) ─────────────────────────────
+	// All migrations execute inside a single database transaction.  On any
+	// failure the transaction is rolled back and the artifact staging directory
+	// is cleaned up — activeDir remains untouched.
+	// Version history and finalisation only occur after both SQL commit AND
+	// artifact promotion succeed (H-02).
 	entries, err := os.ReadDir(updateDir)
 	if err != nil {
+		if artifactStagingDir != "" {
+			os.RemoveAll(artifactStagingDir)
+		}
 		return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 			Error: "Failed to read update package",
 			Code:  http.StatusInternalServerError,
 		})
 	}
-	// Sort lexicographically so migrations run in the documented order (H-01).
+	// Sort lexicographically so migrations execute in the documented order.
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].Name() < entries[j].Name()
 	})
+
+	tx, txErr := h.repo.DB.Begin()
+	if txErr != nil {
+		if artifactStagingDir != "" {
+			os.RemoveAll(artifactStagingDir)
+		}
+		return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error: "Failed to start migration transaction",
+			Code:  http.StatusInternalServerError,
+		})
+	}
 
 	applied := 0
 	for _, entry := range entries {
@@ -611,6 +764,10 @@ func (h *SystemHandler) ApplyUpdate(c echo.Context) error {
 		sqlPath := filepath.Join(updateDir, entry.Name())
 		sqlBytes, err := os.ReadFile(sqlPath)
 		if err != nil {
+			_ = tx.Rollback()
+			if artifactStagingDir != "" {
+				os.RemoveAll(artifactStagingDir)
+			}
 			logrus.WithError(err).WithField("file", entry.Name()).Error("Failed to read SQL migration file")
 			return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
 				Error:   "Failed to read migration file",
@@ -618,10 +775,14 @@ func (h *SystemHandler) ApplyUpdate(c echo.Context) error {
 				Details: entry.Name(),
 			})
 		}
-		if _, err := h.repo.DB.Exec(string(sqlBytes)); err != nil {
-			logrus.WithError(err).WithField("file", entry.Name()).Error("SQL migration failed")
+		if _, err := tx.Exec(string(sqlBytes)); err != nil {
+			_ = tx.Rollback()
+			if artifactStagingDir != "" {
+				os.RemoveAll(artifactStagingDir)
+			}
+			logrus.WithError(err).WithField("file", entry.Name()).Error("SQL migration failed; rolling back — activeDir unchanged")
 			return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-				Error:   "Migration failed",
+				Error:   "Migration failed; all migrations rolled back, no artifacts installed",
 				Code:    http.StatusInternalServerError,
 				Details: entry.Name() + ": " + err.Error(),
 			})
@@ -629,7 +790,53 @@ func (h *SystemHandler) ApplyUpdate(c echo.Context) error {
 		applied++
 	}
 
+	if err := tx.Commit(); err != nil {
+		_ = tx.Rollback()
+		if artifactStagingDir != "" {
+			os.RemoveAll(artifactStagingDir)
+		}
+		return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error: "Failed to commit migrations",
+			Code:  http.StatusInternalServerError,
+		})
+	}
+
+	// ── Promote staged artifacts → activeDir ──────────────────────────────────
+	// SQL has committed; replace activeDir with the staged tree.
+	// This is the single commit point for artifacts: only after success do we
+	// finalise, record history, and return "applied".
+	// On any promotion failure we attempt to restore the pre-update artifact
+	// snapshot and return an explicit error — never a success response (H-02).
+	if artifactStagingDir != "" {
+		if promoteErr := h.promoteArtifacts(artifactStagingDir); promoteErr != nil {
+			// Promotion failed. Attempt immediate artifact restore from the
+			// pre-update snapshot so the system stays in a consistent state.
+			logrus.WithError(promoteErr).Error("Artifact promotion failed after SQL commit; attempting snapshot restore")
+			os.RemoveAll(artifactStagingDir)
+
+			detail := promoteErr.Error()
+			if artifactDir != "" {
+				if restoreErr := h.restoreArtifacts(artifactDir); restoreErr != nil {
+					logrus.WithError(restoreErr).Error("Artifact snapshot restore also failed; manual rollback required")
+					detail = fmt.Sprintf("promotion failed: %v; snapshot restore also failed: %v — manual rollback required", promoteErr, restoreErr)
+				} else {
+					logrus.Warn("Artifact snapshot restored successfully after promotion failure; SQL changes remain — use Rollback endpoint to revert DB")
+					detail = fmt.Sprintf("promotion failed: %v; previous artifacts restored from snapshot — use Rollback endpoint to revert DB changes", promoteErr)
+				}
+			}
+
+			// Do NOT record version history or success audit. Return hard failure.
+			return c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+				Error:   "Artifact promotion failed; update not applied",
+				Code:    http.StatusInternalServerError,
+				Details: detail,
+			})
+		}
+		os.RemoveAll(artifactStagingDir) // staging dir replaced by active; clean up if Rename left it
+	}
+
 	// ── Finalise ──────────────────────────────────────────────────────────────
+	// Reached only when BOTH SQL commit AND artifact promotion succeeded.
 	version := extractPackageVersion(updateDir, timestamp)
 
 	// Rename pending → applied_<timestamp> for auditability.
@@ -669,7 +876,7 @@ func (h *SystemHandler) ApplyUpdate(c echo.Context) error {
 		"status":           "applied",
 		"migrations":       applied,
 		"applied_at":       timestamp,
-		"restart_required": true, // new binary/assets always need a backend restart to take effect
+		"restart_required": true,
 	})
 }
 

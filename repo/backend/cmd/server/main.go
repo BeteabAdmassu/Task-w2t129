@@ -219,9 +219,10 @@ func main() {
 	// Sensitive-field reveal — system_admin only (adminRole is applied in addition to the group's frontDeskRole)
 	mem.GET("/:id/sensitive", memberHandler.RevealSensitiveFields, adminRole)
 	api.GET("/membership-tiers", memberHandler.ListTiers, authMW, frontDeskRole)
-	// Reminders endpoint: any authenticated role may call this so the tray can
-	// show membership expiry notifications regardless of the logged-in user's role.
+	// Reminder endpoints: any authenticated role may call these so the system tray
+	// shows alerts regardless of which role is currently logged in.
 	api.GET("/reminders/memberships", memberHandler.GetMembershipReminders, authMW)
+	api.GET("/reminders/low-stock", inventoryHandler.GetLowStockReminder, authMW)
 
 	// Rate Tables & Charges (admin role)
 	rt := api.Group("/rate-tables", authMW, adminRole)

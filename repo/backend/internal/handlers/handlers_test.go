@@ -565,3 +565,51 @@ func TestGenerateStatement_MissingPeriodDates_Returns400(t *testing.T) {
 		t.Errorf("expected 400 for missing period dates, got %d", rec.Code)
 	}
 }
+
+// TestGenerateStatement_ContractLock_AllRequiredFieldsMustBePresent is a contract-lock
+// test that pins the canonical /statements/generate request schema (H-03 fix).
+// Any change to the required fields must also update docs/api-spec.md and run_tests.sh.
+//
+// Required fields: period_start (YYYY-MM-DD), period_end (YYYY-MM-DD),
+//                  rate_table_id (non-empty string), line_items (non-empty array of
+//                  {description string, quantity number}).
+func TestGenerateStatement_ContractLock_AllRequiredFieldsMustBePresent(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{
+			name: "only period dates — missing rate_table_id and line_items",
+			body: `{"period_start":"2026-01-01","period_end":"2026-01-31"}`,
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "period dates + rate_table_id but no line_items",
+			body: `{"period_start":"2026-01-01","period_end":"2026-01-31","rate_table_id":"rt-1"}`,
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "period dates + empty line_items — missing rate_table_id",
+			body: `{"period_start":"2026-01-01","period_end":"2026-01-31","line_items":[{"description":"x","quantity":1}]}`,
+			want: http.StatusBadRequest,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := echo.New()
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/statements/generate", strings.NewReader(tc.body))
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			rec := httptest.NewRecorder()
+			c := e.NewContext(req, rec)
+
+			h := NewChargeHandler(nil, "test-hmac-key")
+			if err := h.GenerateStatement(c); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if rec.Code != tc.want {
+				t.Errorf("body %q: expected %d, got %d — body: %s", tc.name, tc.want, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
