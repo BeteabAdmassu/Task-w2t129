@@ -476,3 +476,94 @@ func TestPromoteArtifacts_OverwritesExistingActiveDir(t *testing.T) {
 		t.Errorf("expected v2 after promotion, got %q", got)
 	}
 }
+
+// ─── zipManagedFiles: flat-file-only archive ──────────────────────────────────
+//
+// zipManagedFiles must include only non-directory entries in the top level of
+// dataDir. Subdirectories (backups/, active/, versions/, updates/) must be
+// skipped so the archive contains only flat managed-file attachments.
+
+func TestZipManagedFiles_IncludesOnlyFlatFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create flat files in dataDir.
+	flatFiles := []string{"attach-aaa.pdf", "photo-bbb.jpg", "doc-ccc.docx"}
+	for _, name := range flatFiles {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("data:"+name), 0644); err != nil {
+			t.Fatalf("write flat file %q: %v", name, err)
+		}
+	}
+
+	// Create subdirectories that must be excluded.
+	for _, sub := range []string{"backups", "active", "versions", "updates"} {
+		subDir := filepath.Join(dir, sub)
+		if err := os.MkdirAll(subDir, 0755); err != nil {
+			t.Fatalf("mkdir %q: %v", sub, err)
+		}
+		// Put a file inside the subdir — it must NOT appear in the ZIP.
+		if err := os.WriteFile(filepath.Join(subDir, "inner.bin"), []byte("should-be-excluded"), 0644); err != nil {
+			t.Fatalf("write inner file in %q: %v", sub, err)
+		}
+	}
+
+	dest := filepath.Join(t.TempDir(), "output.zip")
+	if err := zipManagedFiles(dir, dest); err != nil {
+		t.Fatalf("zipManagedFiles returned error: %v", err)
+	}
+
+	// Open the resulting ZIP and collect entry names.
+	r, err := zip.OpenReader(dest)
+	if err != nil {
+		t.Fatalf("open ZIP: %v", err)
+	}
+	defer r.Close()
+
+	zipped := make(map[string]bool)
+	for _, f := range r.File {
+		zipped[f.Name] = true
+	}
+
+	// Every flat file must be present.
+	for _, name := range flatFiles {
+		if !zipped[name] {
+			t.Errorf("expected flat file %q in ZIP, not found; entries: %v", name, zipped)
+		}
+	}
+
+	// No subdir entries or their contents must appear.
+	for _, sub := range []string{"backups", "active", "versions", "updates"} {
+		if zipped[sub] || zipped[sub+"/"] {
+			t.Errorf("subdir %q must not appear in ZIP", sub)
+		}
+		if zipped[sub+"/inner.bin"] {
+			t.Errorf("file inside subdir %q must not appear in ZIP", sub)
+		}
+	}
+
+	// Total entry count must equal the number of flat files.
+	if len(r.File) != len(flatFiles) {
+		t.Errorf("expected %d entries in ZIP, got %d; entries: %v", len(flatFiles), len(r.File), zipped)
+	}
+}
+
+func TestZipManagedFiles_EmptyDir_ProducesValidEmptyZip(t *testing.T) {
+	dir := t.TempDir() // only subdirs, no flat files
+	if err := os.MkdirAll(filepath.Join(dir, "backups"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := filepath.Join(t.TempDir(), "empty.zip")
+	if err := zipManagedFiles(dir, dest); err != nil {
+		t.Fatalf("zipManagedFiles on dir with only subdirs should succeed: %v", err)
+	}
+
+	r, err := zip.OpenReader(dest)
+	if err != nil {
+		t.Fatalf("open empty ZIP: %v", err)
+	}
+	defer r.Close()
+
+	if len(r.File) != 0 {
+		t.Errorf("expected 0 entries in ZIP for subdir-only dir, got %d", len(r.File))
+	}
+}

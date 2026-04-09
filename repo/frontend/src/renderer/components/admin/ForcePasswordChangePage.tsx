@@ -62,8 +62,11 @@ const ForcePasswordChangePage: React.FC = () => {
       // Update the stored user to clear must_change_password so the gate lifts
       const updated = { ...user!, must_change_password: false };
       localStorage.setItem('medops_user', JSON.stringify(updated));
-      // Force a full page reload so App re-reads the updated user from localStorage
-      window.location.href = '/';
+      // Reload so useAuth reinitialises from the updated localStorage entry.
+      // window.location.reload() is safe for both packaged file:// and dev http://
+      // origins — unlike window.location.href = '/' which resolves to file:///
+      // in packaged Electron and breaks navigation.
+      window.location.reload();
     } catch (err: any) {
       setError(err.response?.data?.error || err.response?.data?.details || 'Password change failed');
     } finally {

@@ -221,6 +221,36 @@ const StatementsPage: React.FC = () => {
     }
   };
 
+  // Export / Print Record — lightweight CSV export with no status change.
+  // Available for any statement regardless of status (context menu entry).
+  const handleExportRecord = (stmt: ChargeStatement) => {
+    const rows = [
+      ['ID', 'Period Start', 'Period End', 'Total Amount', 'Expected Total', 'Status',
+       'Approved By 1', 'Approved By 2', 'Reconciled At', 'Variance Notes', 'Paid At', 'Created At'],
+      [
+        stmt.id,
+        new Date(stmt.period_start).toLocaleDateString(),
+        new Date(stmt.period_end).toLocaleDateString(),
+        stmt.total_amount.toFixed(2),
+        stmt.expected_total != null ? String(stmt.expected_total) : '',
+        stmt.status,
+        stmt.approved_by_1 || '',
+        stmt.approved_by_2 || '',
+        stmt.reconciled_at ? new Date(stmt.reconciled_at).toLocaleDateString() : '',
+        stmt.variance_notes || '',
+        stmt.paid_at ? new Date(stmt.paid_at).toLocaleDateString() : '',
+        new Date(stmt.created_at).toLocaleDateString(),
+      ],
+    ];
+    const csv = rows.map(r => r.map(c => `"${c}"`).join(',')).join('\n');
+    const url = window.URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `statement-record-${stmt.id.slice(0, 8)}.csv`;
+    a.click();
+    window.URL.revokeObjectURL(url);
+  };
+
   // Export CSV (approved → paid)
   const handleExport = async (overrideId?: string) => {
     const id = overrideId ?? selectedStatement?.id;
@@ -326,6 +356,7 @@ const StatementsPage: React.FC = () => {
             ...(ctxMenu.stmt.status === 'approved'
               ? [{ label: 'Export / Mark Paid', onClick: () => { handleExport(ctxMenu.stmt.id); setCtxMenu(null); } }]
               : []),
+            { label: 'Export / Print Record', onClick: () => { handleExportRecord(ctxMenu.stmt); setCtxMenu(null); } },
           ]}
         />
       )}

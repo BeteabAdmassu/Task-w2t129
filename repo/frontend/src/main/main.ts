@@ -586,7 +586,7 @@ app.whenReady().then(async () => {
         // App.tsx to treat the session as authenticated and auto-redirect from
         // /login back to the dashboard — bypassing the lock entirely.
         win.webContents.executeJavaScript(
-          `localStorage.removeItem('medops_token'); localStorage.removeItem('medops_user'); window.location.href = '/login';`,
+          `localStorage.removeItem('medops_token'); localStorage.removeItem('medops_user'); window.location.reload();`,
         );
       }
     },

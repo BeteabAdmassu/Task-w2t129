@@ -28,7 +28,7 @@ api.interceptors.response.use(
     if (error.response?.status === 401) {
       localStorage.removeItem('medops_token');
       localStorage.removeItem('medops_user');
-      window.location.href = '/login';
+      window.location.hash = '/login';
     }
     return Promise.reject(error);
   }

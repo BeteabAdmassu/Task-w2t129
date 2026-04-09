@@ -647,3 +647,98 @@ describe('F-001 lock-screen auth state', () => {
     expect(isAuthenticatedFromStorage()).toBe(true);
   });
 });
+
+// ─── HashRouter / file-safe navigation (packaged Electron) ───────────────────
+//
+// In packaged Electron mode the renderer loads from a file:// origin.
+// window.location.href = '/login' resolves to file:///login (non-existent),
+// breaking navigation. The fix:
+//   • App.tsx uses HashRouter so all routes are fragment-based (#/login, etc.)
+//   • 401 interceptor (api.ts) sets window.location.hash = '/login'
+//   • Lock handler (main.ts) calls window.location.reload() — after clearing
+//     localStorage the bootstrap logic in useAuth sees no token and ProtectedRoute
+//     redirects to #/login automatically.
+
+/** Simulates the 401-interceptor navigation used in api.ts (hash-based). */
+function apply401Redirect(): void {
+  localStorage.removeItem('medops_token');
+  localStorage.removeItem('medops_user');
+  // Hash-based redirect — safe for file:// origins
+  window.location.hash = '/login';
+}
+
+/** Simulates the BROKEN 401 redirect (href-based, fails on file:// origins). */
+function apply401RedirectBuggy(): void {
+  localStorage.removeItem('medops_token');
+  localStorage.removeItem('medops_user');
+  // This sets href to file:///login in packaged mode — broken
+  // Intentionally NOT called in production; exists only to document the bug.
+  window.location.href = '/login';
+}
+
+describe('HashRouter / file-safe navigation', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    // Reset hash to a neutral state before each test
+    window.location.hash = '';
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    window.location.hash = '';
+  });
+
+  it('401 redirect clears auth storage', () => {
+    localStorage.setItem('medops_token', 'eyJ...');
+    localStorage.setItem('medops_user', JSON.stringify({ id: 'u1', role: 'admin' }));
+
+    apply401Redirect();
+
+    expect(localStorage.getItem('medops_token')).toBeNull();
+    expect(localStorage.getItem('medops_user')).toBeNull();
+  });
+
+  it('401 redirect sets window.location.hash to /login (fragment-based)', () => {
+    localStorage.setItem('medops_token', 'eyJ...');
+    localStorage.setItem('medops_user', JSON.stringify({ id: 'u1', role: 'admin' }));
+
+    apply401Redirect();
+
+    // Hash must contain /login — HashRouter renders #/login
+    expect(window.location.hash).toContain('/login');
+  });
+
+  it('hash-based redirect does NOT contain an absolute file:// path', () => {
+    apply401Redirect();
+    // Absolute href should not look like a bare path-only navigation
+    // i.e. location.pathname should NOT be '/login' after a hash-only change
+    expect(window.location.pathname).not.toBe('/login');
+  });
+
+  it('lock reload: after clearing storage isAuthenticated is false (ProtectedRoute redirects)', () => {
+    localStorage.setItem('medops_token', 'eyJ...');
+    localStorage.setItem('medops_user', JSON.stringify({ id: 'u1', role: 'front_desk' }));
+
+    // Simulate what main.ts executeJavaScript now does:
+    //   localStorage.removeItem('medops_token');
+    //   localStorage.removeItem('medops_user');
+    //   window.location.reload();  ← reload handled by browser; we just verify storage
+    applyLock();
+
+    // After reload useAuth sees no user → isAuthenticated=false → ProtectedRoute → #/login
+    expect(isAuthenticatedFromStorage()).toBe(false);
+  });
+
+  it('buggy 401 redirect (href) does NOT set hash fragment (documents broken behaviour)', () => {
+    localStorage.setItem('medops_token', 'eyJ...');
+    localStorage.setItem('medops_user', JSON.stringify({ id: 'u1', role: 'admin' }));
+
+    // In a real file:// context this would navigate to file:///login (broken),
+    // but in jsdom it resolves differently — we verify the hash is NOT set,
+    // confirming the href approach bypasses HashRouter.
+    apply401RedirectBuggy();
+
+    // href-based navigation does not set the hash fragment
+    expect(window.location.hash).not.toContain('/login');
+  });
+});

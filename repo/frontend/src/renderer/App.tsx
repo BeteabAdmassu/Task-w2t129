@@ -1,5 +1,10 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+// HashRouter is required for Electron packaged mode where the renderer runs
+// from file:// origins.  BrowserRouter's absolute-path navigation (e.g.
+// window.location.href = '/login') resolves to file:///login which does not
+// exist.  HashRouter maps all routes under the fragment (#/login, #/, …) so
+// navigation works identically in both web/Docker and packaged desktop modes.
+import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './hooks/useAuth';
 import { ROUTE_CONFIG } from './routeConfig';
 import Layout from './components/common/Layout';
@@ -45,7 +50,7 @@ export default function App() {
   const { isAuthenticated } = useAuth();
 
   return (
-    <BrowserRouter>
+    <HashRouter>
       <Routes>
         <Route path="/login" element={isAuthenticated ? <Navigate to="/" replace /> : <LoginPage />} />
         <Route path="/" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />
@@ -66,6 +71,6 @@ export default function App() {
         <Route path="/system-config" element={<RoleRoute roles={routeRoles('/system-config')}><SystemConfigPage /></RoleRoute>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-    </BrowserRouter>
+    </HashRouter>
   );
 }

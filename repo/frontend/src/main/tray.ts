@@ -268,24 +268,26 @@ async function checkMembershipAndStock(opts: TrayOptions): Promise<void> {
         const expiresMs = new Date(m.expires_at).getTime();
         const daysLeft = (expiresMs - now) / (1000 * 60 * 60 * 24);
         if (daysLeft < 0) continue; // already expired — skip
-        if (daysLeft <= 1) {
+        // Fire only at the exact checkpoint days (rounded to nearest whole day).
+        // This prevents repeat-firing on every poll cycle when daysLeft is within
+        // a continuous range — notifications are sent once at 14, 7, and 1 day(s).
+        const daysRounded = Math.round(daysLeft);
+        if (daysRounded === 1) {
           fireNotification(
             'URGENT: Membership Expiring Today',
             `URGENT: Member ${m.name} expires today!`,
             opts.onOpen,
           );
-        } else if (daysLeft <= 7) {
-          const n = Math.ceil(daysLeft);
+        } else if (daysRounded === 7) {
           fireNotification(
             'Membership Expiry Warning',
-            `Member ${m.name} membership expires in ${n} days`,
+            `Member ${m.name} membership expires in 7 days`,
             opts.onOpen,
           );
-        } else if (daysLeft <= 14) {
-          const n = Math.ceil(daysLeft);
+        } else if (daysRounded === 14) {
           fireNotification(
             'Membership Expiry Reminder',
-            `Reminder: Member ${m.name} membership expires in ${n} days`,
+            `Reminder: Member ${m.name} membership expires in 14 days`,
             opts.onOpen,
           );
         }

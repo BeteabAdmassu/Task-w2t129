@@ -268,6 +268,27 @@ const RateTablesPage: React.FC = () => {
               onClick: () => { setExpandedId(expandedId === ctxMenu.rt.id ? null : ctxMenu.rt.id); setCtxMenu(null); },
             },
             { label: 'Edit Rate Table', onClick: () => handleEdit(ctxMenu.rt) },
+            {
+              label: 'Export / Print',
+              onClick: () => {
+                const rt = ctxMenu.rt;
+                const rows = [
+                  ['Name', 'Type', 'Tier Min', 'Tier Max', 'Rate', 'Fuel Surcharge %', 'Taxable', 'Effective Date'],
+                  ...rt.tiers.map(t => [
+                    rt.name, rt.type, String(t.min), String(t.max), String(t.rate),
+                    String(rt.fuel_surcharge_pct), rt.taxable ? 'Yes' : 'No', rt.effective_date,
+                  ]),
+                ];
+                const csv = rows.map(r => r.map(c => `"${c}"`).join(',')).join('\n');
+                const url = window.URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `rate-table-${rt.id.slice(0, 8)}.csv`;
+                a.click();
+                window.URL.revokeObjectURL(url);
+                setCtxMenu(null);
+              },
+            },
           ]}
         />
       )}

@@ -1,195 +1,282 @@
-1. Verdict
-- Fail
+# 1. Verdict
+- **Overall conclusion:** **Partial Pass**
+- Delivery is substantial and broadly aligned with the MedOps prompt, but there are material requirement-fit gaps in core desktop interaction requirements and backup scope.
 
-2. Scope and Verification Boundary
-- Reviewed: `repo/README.md`, `repo/docker-compose.yml`, backend entry/middleware/handlers/repository/models/migrations, frontend router/pages/hooks/services/types, and test/config files.
-- Excluded by rule: all content under `./.tmp/` was not used as evidence.
-- Not executed: app startup, Docker, tests, browser flows, performance checks, uptime checks.
-- Cannot be statically confirmed: runtime cold-start `<10s`, 30-day stability, high-DPI rendering quality, real tray behavior, true backup integrity, and installer behavior.
-- Manual verification required where noted for runtime-only claims.
+# 2. Scope and Static Verification Boundary
+- **Reviewed (static only):** backend handlers/middleware/repository/migrations, Electron main/tray, React routes/pages/hooks/services, README/design/API docs, and test files under `repo/backend` and `repo/frontend`.
+- **Excluded as evidence source:** `./.tmp/**` (per instruction).
+- **Not executed intentionally:** app startup, Docker, tests, database, browser rendering, performance checks, uptime checks, installer execution.
+- **Cannot confirm statically / manual verification required:**
+  - Cold start under 10 seconds.
+  - 30-day uptime stability and resource behavior under long runtime.
+  - Actual high-DPI rendering quality on Windows 11.
+  - Real installer/runtime behavior across environments.
 
-3. Prompt / Repository Mapping Summary
-- Prompt core goal: offline Windows desktop MedOps console (Electron + React + embedded Go + local Postgres MSI) with regulated inventory, learning, memberships, work orders, strict security/RBAC, tray/shortcuts/multi-window, and offline update/rollback.
-- Implementation reviewed: Dockerized web full-stack (`repo/docker-compose.yml:1`, `repo/frontend/src/renderer/App.tsx:2`, `repo/backend/cmd/server/main.go:120`) with Go/Echo API + React SPA.
-- Key mismatch: delivered architecture is browser + Docker oriented, not Electron desktop installer/workspace.
+# 3. Prompt / Repository Mapping Summary
+- **Prompt core goal:** Offline desktop operations console for inventory, learning, memberships, work orders, charges/settlement, file retention/export, local auth/RBAC/security, and updater/rollback.
+- **Main flows mapped:**
+  - Auth/RBAC/lockout/password policy.
+  - Inventory receive/dispense/adjust/stocktake.
+  - Learning hierarchy/search/import/export.
+  - Membership freeze/unfreeze/redeem/refund/session packages.
+  - Work-order intake/dispatch/SLA/close/rating.
+  - Charges/reconciliation/two-step approval/export signing.
+  - Tray lock/reminders/backup, multi-window, draft autosave, update/rollback.
+- **Primary implementation areas reviewed:**
+  - Backend routes/guards and object authorization in [`repo/backend/cmd/server/main.go:126`](repo/backend/cmd/server/main.go:126), [`repo/backend/internal/middleware/middleware.go:58`](repo/backend/internal/middleware/middleware.go:58), [`repo/backend/internal/handlers/workorders.go:249`](repo/backend/internal/handlers/workorders.go:249).
+  - Desktop shell in [`repo/frontend/src/main/main.ts:408`](repo/frontend/src/main/main.ts:408), [`repo/frontend/src/main/tray.ts:110`](repo/frontend/src/main/tray.ts:110).
+  - UI routes/pages in [`repo/frontend/src/renderer/App.tsx:46`](repo/frontend/src/renderer/App.tsx:46), [`repo/frontend/src/renderer/routeConfig.ts:16`](repo/frontend/src/renderer/routeConfig.ts:16).
 
-4. High / Blocker Coverage Panel
-- A. Prompt-fit / completeness blockers: Fail — required desktop-shell capabilities and several core constraints are absent or replaced (F-001, F-002, F-009). Evidence: `repo/README.md:9`, `repo/frontend/package.json:6`, `repo/frontend/src/renderer/App.tsx:2`, `repo/backend/internal/handlers/system.go:35`.
-- B. Static delivery / structure blockers: Partial Pass — structure is coherent, but primary route wiring has static breaks (F-003). Evidence: `repo/frontend/src/renderer/App.tsx:39`, `repo/frontend/src/renderer/components/common/Layout.tsx:17`, `repo/frontend/src/renderer/components/inventory/StocktakePage.tsx:92`.
-- C. Frontend-controllable interaction / state blockers: Fail — key navigation/state paths are broken and required keyboard-first flows are not implemented (F-002, F-003). Evidence: `repo/frontend/src/renderer/components/admin/LoginPage.tsx:25`, `repo/frontend/src/renderer/App.tsx:37`, `repo/frontend/src/renderer/components/common/Layout.tsx:21`.
-- D. Data exposure / delivery-risk blockers: Fail — hardcoded secrets/default credentials + incomplete at-rest encryption handling (F-008). Evidence: `repo/README.md:43`, `repo/README.md:76`, `repo/backend/internal/config/config.go:22`, `repo/backend/internal/handlers/members.go:133`.
-- E. Test-critical gaps: Fail — tests exist but do not meaningfully cover critical security/object-authorization/integration risks (F-010). Evidence: `repo/backend/internal/handlers/handlers_test.go:115`, `repo/frontend/src/renderer/utils.test.ts:10`.
+# 4. Section-by-section Review
 
-5. Confirmed Blocker / High Findings
-- Finding ID: F-001
-  - Severity: Blocker
-  - Conclusion: Delivered architecture materially deviates from required desktop offline shell.
-  - Brief rationale: Prompt requires Electron desktop + bundled local Postgres MSI + tray/desktop workspace; delivery is Dockerized web stack.
-  - Evidence: `repo/README.md:9`, `repo/README.md:20`, `repo/docker-compose.yml:1`, `repo/frontend/src/renderer/App.tsx:2`, `repo/frontend/package.json:6`.
-  - Impact: Core business environment/operational model is not what was requested; acceptance hard gate fails.
-  - Minimum actionable fix: Introduce Electron main/preload processes, local embedded service orchestration, and installer packaging (`.msi`) artifacts with offline runtime paths.
+## 4.1 Hard Gates
 
-- Finding ID: F-002
-  - Severity: Blocker
-  - Conclusion: Prompt-critical desktop interaction capabilities are not implemented.
-  - Brief rationale: Required Ctrl+K/Ctrl+N/Ctrl+Enter/F2, tray lock/reminders, and multi-window parallel operations are missing; only Alt+navigation shortcuts exist.
-  - Evidence: `repo/frontend/src/renderer/components/common/Layout.tsx:17`, `repo/frontend/src/renderer/components/common/Layout.tsx:41`, `repo/frontend/src/renderer/App.tsx:37`, `repo/frontend/package.json:13`.
-  - Impact: Primary operator workflows (keyboard-first desktop operations and tray mode) cannot be validated as delivered.
-  - Minimum actionable fix: Implement global command palette + record/edit/save shortcuts, Electron tray lock/reminder services, and multi-window workflow handlers.
+### 4.1.1 Documentation and static verifiability
+- **Conclusion:** **Partial Pass**
+- **Rationale:** Documentation is extensive and mostly consistent with structure/scripts, but development guidance is heavily Docker-first and mixed with desktop mode, creating verification friction for offline-desktop acceptance.
+- **Evidence:** [`repo/README.md:21`](repo/README.md:21), [`repo/README.md:55`](repo/README.md:55), [`repo/README.md:243`](repo/README.md:243), [`repo/frontend/package.json:6`](repo/frontend/package.json:6).
+- **Manual verification note:** Desktop packaging and embedded PostgreSQL behavior require manual run.
 
-- Finding ID: F-003
-  - Severity: High
-  - Conclusion: Static route wiring breaks multiple core frontend flows.
-  - Brief rationale: UI navigates to routes not registered in router; stocktake detail path is referenced but absent.
-  - Evidence: `repo/frontend/src/renderer/components/admin/LoginPage.tsx:25`, `repo/frontend/src/renderer/components/common/Layout.tsx:17`, `repo/frontend/src/renderer/components/common/Layout.tsx:21`, `repo/frontend/src/renderer/components/inventory/StocktakePage.tsx:92`, `repo/frontend/src/renderer/App.tsx:37`.
-  - Impact: Users are redirected unexpectedly; stocktake workflow closure is statically broken.
-  - Minimum actionable fix: Align all navigation targets with declared routes; add `/dashboard`, `/stocktakes/:id`, and any linked admin/inventory config routes or remove dead links.
+### 4.1.2 Prompt alignment / material deviation
+- **Conclusion:** **Partial Pass**
+- **Rationale:** Most business domains are implemented, but required table interaction contract (context-menu action set and keyboard edit behavior across workflows) is only partially implemented.
+- **Evidence:** [`repo/frontend/src/renderer/components/common/Layout.tsx:73`](repo/frontend/src/renderer/components/common/Layout.tsx:73), [`repo/frontend/src/renderer/components/admin/UsersPage.tsx:44`](repo/frontend/src/renderer/components/admin/UsersPage.tsx:44), [`repo/frontend/src/renderer/components/members/MembersPage.tsx:208`](repo/frontend/src/renderer/components/members/MembersPage.tsx:208), [`repo/frontend/src/renderer/components/learning/LearningPage.tsx:473`](repo/frontend/src/renderer/components/learning/LearningPage.tsx:473).
 
-- Finding ID: F-004
-  - Severity: High
-  - Conclusion: Statement reconciliation/approval workflow is internally inconsistent and likely non-functional.
-  - Brief rationale: Handler sets statuses not allowed by DB CHECK constraints.
-  - Evidence: `repo/backend/internal/handlers/charges.go:561`, `repo/backend/internal/handlers/charges.go:623`, `repo/backend/migrations/000001_init.up.sql:254`.
-  - Impact: Reconcile/approval transitions can fail at persistence layer; settlement flow integrity is broken.
-  - Minimum actionable fix: Normalize status state machine between handler and schema (single enum set), then update frontend status handling to match.
+## 4.2 Delivery Completeness
 
-- Finding ID: F-005
-  - Severity: High
-  - Conclusion: Inventory adjustment transaction writes invalid transaction type.
-  - Brief rationale: `adjustment_in/out` is inserted into a column constrained to `in/out`.
-  - Evidence: `repo/backend/internal/handlers/inventory.go:647`, `repo/backend/internal/handlers/inventory.go:659`, `repo/backend/migrations/000001_init.up.sql:69`.
-  - Impact: Prompt-required quick-adjust style operations can fail to persist transaction records.
-  - Minimum actionable fix: Use schema-valid enum values (`in`/`out`) plus a dedicated reason code for adjustment direction.
+### 4.2.1 Core requirement coverage
+- **Conclusion:** **Partial Pass**
+- **Rationale:** Core modules exist and many constraints are implemented (SLA, redemption checks, stock rules, approvals), but backup scope misses managed files and required interaction parity is incomplete.
+- **Evidence:**
+  - SLA/dispatch: [`repo/backend/internal/handlers/workorders.go:42`](repo/backend/internal/handlers/workorders.go:42), [`repo/backend/internal/handlers/workorders.go:187`](repo/backend/internal/handlers/workorders.go:187)
+  - Inventory constraints: [`repo/backend/internal/handlers/inventory.go:495`](repo/backend/internal/handlers/inventory.go:495), [`repo/backend/internal/handlers/inventory.go:506`](repo/backend/internal/handlers/inventory.go:506), [`repo/backend/internal/handlers/inventory.go:665`](repo/backend/internal/handlers/inventory.go:665)
+  - Membership constraints: [`repo/backend/internal/handlers/members.go:611`](repo/backend/internal/handlers/members.go:611), [`repo/backend/internal/handlers/members.go:714`](repo/backend/internal/handlers/members.go:714), [`repo/backend/internal/handlers/members.go:999`](repo/backend/internal/handlers/members.go:999)
+  - Backup gap: [`repo/backend/internal/handlers/system.go:255`](repo/backend/internal/handlers/system.go:255), [`docs/design.md:529`](docs/design.md:529)
 
-- Finding ID: F-006
-  - Severity: High
-  - Conclusion: Work-order auto-dispatch role lookup is mismatched and likely never finds technicians.
-  - Brief rationale: Repository queries role `technician`, but seeded/validated role is `maintenance_tech`.
-  - Evidence: `repo/backend/internal/repository/repository.go:800`, `repo/backend/migrations/000001_init.up.sql:18`, `repo/backend/internal/handlers/users.go:34`.
-  - Impact: Prompt-mandated auto-dispatch by workload is effectively disabled.
-  - Minimum actionable fix: Standardize role ID (`maintenance_tech`) across repository lookup and any assignment logic.
+### 4.2.2 End-to-end deliverable shape
+- **Conclusion:** **Pass**
+- **Rationale:** Coherent multi-module product structure with backend, desktop shell, renderer routes/pages, migrations, and tests; not a fragment/demo-only layout.
+- **Evidence:** [`repo/README.md:104`](repo/README.md:104), [`repo/frontend/src/renderer/App.tsx:46`](repo/frontend/src/renderer/App.tsx:46), [`repo/backend/cmd/server/main.go:136`](repo/backend/cmd/server/main.go:136).
 
-- Finding ID: F-007
-  - Severity: High
-  - Conclusion: Object-level authorization and tenant isolation are insufficient for sensitive resources.
-  - Brief rationale: Any authenticated user can fetch arbitrary work order by ID and download arbitrary managed file by ID.
-  - Evidence: `repo/backend/cmd/server/main.go:177`, `repo/backend/cmd/server/main.go:181`, `repo/backend/cmd/server/main.go:216`, `repo/backend/internal/handlers/workorders.go:198`, `repo/backend/internal/handlers/files.go:157`.
-  - Impact: Cross-role/cross-user data exposure risk; prompt security and tenant-boundary expectations are not met.
-  - Minimum actionable fix: Enforce object-level checks (submitter/assignee/role constraints) and bind file access to owning entity permissions.
+## 4.3 Engineering and Architecture Quality
 
-- Finding ID: F-008
-  - Severity: High
-  - Conclusion: Sensitive-data handling does not meet prompt security constraints.
-  - Brief rationale: Secrets/default credentials are hardcoded; deposits are processed in plaintext field; key is env-based, not OS credential storage.
-  - Evidence: `repo/README.md:43`, `repo/README.md:76`, `repo/backend/internal/config/config.go:22`, `repo/backend/internal/handlers/members.go:133`, `repo/backend/migrations/000001_init.up.sql:209`.
-  - Impact: Increased credential/data exposure risk and non-compliance with required at-rest protection model.
-  - Minimum actionable fix: Remove default secrets/creds from docs/config, load encryption key from OS credential store, and persist sensitive monetary/verification fields only in encrypted columns.
+### 4.3.1 Structure and modularity
+- **Conclusion:** **Pass**
+- **Rationale:** Reasonable separation of handlers/repository/middleware and page components/hooks/services.
+- **Evidence:** [`repo/README.md:108`](repo/README.md:108), [`repo/backend/internal/repository/repository.go:23`](repo/backend/internal/repository/repository.go:23), [`repo/frontend/src/renderer/services/api.ts:1`](repo/frontend/src/renderer/services/api.ts:1).
 
-- Finding ID: F-009
-  - Severity: High
-  - Conclusion: Backup/update/rollback requirements are represented by placeholder or missing implementations.
-  - Brief rationale: Backup endpoint returns success without backup execution; update/rollback endpoints required by prompt are absent.
-  - Evidence: `repo/backend/internal/handlers/system.go:35`, `repo/backend/internal/handlers/system.go:49`, `repo/backend/cmd/server/main.go:223`.
-  - Impact: Operators can receive false-success signals for critical operational controls.
-  - Minimum actionable fix: Implement real backup artifact generation/verification and add offline package import + one-click rollback APIs/UI with audit logs.
+### 4.3.2 Maintainability/extensibility
+- **Conclusion:** **Partial Pass**
+- **Rationale:** Generally maintainable, but some UX contracts are centralized in `Layout` and not uniformly consumed by feature pages, creating extension inconsistency risk.
+- **Evidence:** [`repo/frontend/src/renderer/components/common/Layout.tsx:73`](repo/frontend/src/renderer/components/common/Layout.tsx:73), [`repo/frontend/src/renderer/components/admin/UsersPage.tsx:44`](repo/frontend/src/renderer/components/admin/UsersPage.tsx:44), [`repo/frontend/src/renderer/components/workorders/WorkOrdersPage.tsx:65`](repo/frontend/src/renderer/components/workorders/WorkOrdersPage.tsx:65).
 
-- Finding ID: F-010
-  - Severity: High
-  - Conclusion: Test suite is insufficient for critical security and main-flow credibility.
-  - Brief rationale: Backend tests are mostly pre-DB validation and pure functions; frontend tests are inline utility tests not tied to app components/routes.
-  - Evidence: `repo/backend/internal/handlers/handlers_test.go:115`, `repo/backend/internal/handlers/handlers_test.go:160`, `repo/frontend/src/renderer/utils.test.ts:10`, `repo/frontend/src/renderer/utils.test.ts:59`.
-  - Impact: Severe defects in authorization, route wiring, and transactional flows can remain undetected.
-  - Minimum actionable fix: Add API-level authz/object-authorization tests plus frontend route/component integration tests for core workflows.
+## 4.4 Engineering Details and Professionalism
 
-6. Other Findings Summary
-- Severity: Medium
-  - Conclusion: Draft retrieval/deletion authorization is error-prone and role check is inconsistent (`admin` vs `system_admin`).
-  - Evidence: `repo/backend/internal/handlers/system.go:227`, `repo/backend/internal/handlers/system.go:263`, `repo/backend/internal/handlers/system.go:215`.
-  - Minimum actionable fix: Use consistent role ID and null-safe checks before dereferencing draft records.
-- Severity: Medium
-  - Conclusion: Prompt-required signed JSON export is missing (CSV only).
-  - Evidence: `repo/backend/internal/handlers/charges.go:675`, `repo/backend/internal/handlers/charges.go:756`.
-  - Minimum actionable fix: Add signed JSON export pathway and explicit format selector.
-- Severity: Medium
-  - Conclusion: Retention rules are modeled but not enforced.
-  - Evidence: `repo/backend/migrations/000001_init.up.sql:175`, `repo/backend/internal/handlers/files.go:113`.
-  - Minimum actionable fix: Add retention assignment + cleanup scheduler and audit trail.
-- Severity: Low
-  - Conclusion: README and implementation posture are tightly coupled to Docker, conflicting with offline desktop acceptance narrative.
-  - Evidence: `repo/README.md:9`, `repo/README.md:20`.
-  - Minimum actionable fix: Provide desktop installer/runbook documentation aligned with actual delivery target.
+### 4.4.1 Error handling/logging/validation/API quality
+- **Conclusion:** **Partial Pass**
+- **Rationale:** Validation and structured logging are broadly present; however, key flow requirements (backup scope, keyboard/context parity) are not fully met.
+- **Evidence:**
+  - Auth/password/lockout validation: [`repo/backend/internal/handlers/auth.go:70`](repo/backend/internal/handlers/auth.go:70), [`repo/backend/internal/handlers/auth.go:190`](repo/backend/internal/handlers/auth.go:190)
+  - Statement reconciliation and approvals: [`repo/backend/internal/handlers/charges.go:648`](repo/backend/internal/handlers/charges.go:648), [`repo/backend/internal/handlers/charges.go:738`](repo/backend/internal/handlers/charges.go:738)
+  - Request logging middleware: [`repo/backend/internal/middleware/middleware.go:191`](repo/backend/internal/middleware/middleware.go:191)
 
-7. Data Exposure and Delivery Risk Summary
-- Real sensitive information exposure: Partial Pass — default admin credentials and default secrets are exposed in docs/config (`repo/README.md:43`, `repo/README.md:76`, `repo/.env.example:4`).
-- Hidden debug / config / demo-only surfaces: Pass — no hidden demo toggles found statically; admin config endpoints are RBAC-protected (`repo/backend/cmd/server/main.go:222`).
-- Undisclosed mock scope or default mock behavior: Partial Pass — no broad mock layer found, but backup path returns success without real action (`repo/backend/internal/handlers/system.go:35`).
-- Fake-success or misleading delivery behavior: Fail — backup success response is unconditional and can mislead operators (`repo/backend/internal/handlers/system.go:49`).
-- Visible UI / console / storage leakage risk: Partial Pass — auth token/user are stored in `localStorage` (`repo/frontend/src/renderer/services/api.ts:12`), which is expected in web apps but weaker than desktop secure store target.
+### 4.4.2 Product credibility
+- **Conclusion:** **Pass**
+- **Rationale:** Product-like shape with role-based routing, tray integration, updater/rollback flow, and data model breadth.
+- **Evidence:** [`repo/frontend/src/main/main.ts:558`](repo/frontend/src/main/main.ts:558), [`repo/frontend/src/main/tray.ts:125`](repo/frontend/src/main/tray.ts:125), [`repo/backend/internal/handlers/system.go:579`](repo/backend/internal/handlers/system.go:579).
 
-8. Test Sufficiency Summary
-- Test Overview
-  - Unit tests exist: yes (backend handler-level validation/pure function tests, frontend util file).
-  - Component tests exist: no direct component test files found.
-  - Page/route integration tests exist: missing.
-  - E2E tests exist: host script (`repo/run_tests.sh`) exists but not executed in this audit.
-  - Obvious entry points: `repo/backend/internal/handlers/handlers_test.go:1`, `repo/frontend/src/renderer/utils.test.ts:1`, `repo/run_tests.sh:1`.
-- Core Coverage
-  - happy path: partially covered
-  - key failure paths: partially covered
-  - interaction / state coverage: missing
-- Major Gaps (highest risk)
-  - Missing tests for object-level authorization on work orders/files (`repo/backend/internal/handlers/workorders.go:198`, `repo/backend/internal/handlers/files.go:157`).
-  - Missing tests for router integrity and linked paths (`repo/frontend/src/renderer/App.tsx:37`, `repo/frontend/src/renderer/components/common/Layout.tsx:17`).
-  - Missing tests for settlement status machine consistency against DB constraints (`repo/backend/internal/handlers/charges.go:561`, `repo/backend/migrations/000001_init.up.sql:254`).
-  - Missing tests for inventory adjustment enum compatibility (`repo/backend/internal/handlers/inventory.go:659`, `repo/backend/migrations/000001_init.up.sql:69`).
-  - Frontend tests do not exercise real components/services; they test inline helpers only (`repo/frontend/src/renderer/utils.test.ts:10`).
-- Final Test Verdict
-  - Fail
+## 4.5 Prompt Understanding and Requirement Fit
 
-9. Engineering Quality Summary
-- Acceptance Section 1 (Hard Gates)
-  - 1.1 Documentation and Static Verifiability: Partial Pass — startup/test docs exist and mostly map to repo files (`repo/README.md:18`, `repo/run_tests.sh:1`), but target delivery model is Docker/web not prompt desktop installer.
-  - 1.2 Prompt Alignment: Fail — architecture and critical desktop constraints are materially replaced (`repo/README.md:20`, `repo/frontend/src/renderer/App.tsx:2`).
-- Acceptance Section 2 (Delivery Completeness)
-  - 2.1 Core Requirement Coverage: Partial Pass — core domains exist, but multiple prompt-critical requirements are missing/broken (F-001/F-002/F-004/F-005/F-009).
-  - 2.2 End-to-End 0→1 Deliverable: Partial Pass — coherent project shape exists (`repo/backend`, `repo/frontend`), but several core flows are not credibly complete due static defects.
-- Acceptance Section 3 (Engineering/Architecture Quality)
-  - 3.1 Structure and Modularity: Pass — backend/handlers/repository and frontend/components/services separation is clear (`repo/backend/internal`, `repo/frontend/src/renderer/components`).
-  - 3.2 Maintainability/Extensibility: Partial Pass — generally modular, but key domain state machines are inconsistent across layers (F-004/F-006).
-- Acceptance Section 4 (Engineering Detail/Professionalism)
-  - 4.1 Engineering quality: Partial Pass — many validations/logs exist (`repo/backend/internal/handlers/*.go`, `repo/backend/internal/middleware/middleware.go:131`), but critical logic defects and fake-success path reduce reliability.
-  - 4.2 Product credibility: Partial Pass — resembles product scaffold, but route breaks and missing desktop-critical behaviors reduce credibility.
-- Acceptance Section 5 (Prompt Understanding/Fit)
-  - 5.1 Business understanding: Fail — delivery implements many domain forms/endpoints but misses/changes core operational constraints (desktop shell/tray/offline updater/security model).
-- Acceptance Section 6 (Visual/Interaction Quality, static-only)
-  - 6.1 Conclusion: Cannot Confirm — static structure shows basic hierarchy/feedback components (`repo/frontend/src/renderer/components/common/*.tsx`), but runtime rendering quality and DPI behavior need manual verification.
+### 4.5.1 Business understanding and fit
+- **Conclusion:** **Partial Pass**
+- **Rationale:** Core business semantics are mostly understood and implemented, but prompt-critical UI interaction standard and backup expectation are not fully delivered.
+- **Evidence:** [`repo/backend/internal/handlers/workorders.go:42`](repo/backend/internal/handlers/workorders.go:42), [`repo/backend/internal/handlers/members.go:936`](repo/backend/internal/handlers/members.go:936), [`repo/backend/internal/handlers/system.go:255`](repo/backend/internal/handlers/system.go:255), [`repo/frontend/src/renderer/components/learning/LearningPage.tsx:473`](repo/frontend/src/renderer/components/learning/LearningPage.tsx:473).
 
-- Security Review (required)
-  - Authentication entry points: Partial Pass — login/me/password/logout endpoints exist with JWT + lockout logic (`repo/backend/cmd/server/main.go:126`, `repo/backend/internal/handlers/auth.go:71`).
-  - Route-level authorization: Partial Pass — role middleware widely applied (`repo/backend/cmd/server/main.go:132`, `repo/backend/cmd/server/main.go:201`), but some broad groups remain over-permissive for sensitive objects (F-007).
-  - Object-level authorization: Fail — no ownership checks in work-order/file read paths (`repo/backend/internal/handlers/workorders.go:198`, `repo/backend/internal/handlers/files.go:157`).
-  - Function-level authorization: Partial Pass — role checks exist, but logic inconsistencies remain (e.g., draft admin role string mismatch: `repo/backend/internal/handlers/system.go:228`).
-  - Tenant / user isolation: Fail — no tenant model/constraints are present for work-order scope (`repo/backend/migrations/000001_init.up.sql:145`).
-  - Admin / internal / debug protection: Partial Pass — admin system/config routes are protected (`repo/backend/cmd/server/main.go:222`); no explicit debug endpoints found.
+## 4.6 Aesthetics (frontend/full-stack)
 
-- Tests and Logging Review (required)
-  - Unit tests: Partial Pass — present but heavily validation-only and shallow for high-risk flows (`repo/backend/internal/handlers/handlers_test.go:160`).
-  - API/integration tests: Partial Pass — `run_tests.sh` covers many endpoint paths statically (`repo/run_tests.sh:58`), but no object-level auth assertions.
-  - Logging categories/observability: Partial Pass — structured JSON request logs and domain logs exist (`repo/backend/internal/middleware/middleware.go:133`, `repo/backend/internal/middleware/middleware.go:165`).
-  - Sensitive-data leakage risk in logs/responses: Partial Pass — no direct password logging found, but hardcoded secrets/default creds and localStorage token storage remain risk points.
+### 4.6.1 Visual and interaction quality
+- **Conclusion:** **Cannot Confirm Statistically**
+- **Rationale:** Static code shows structured layout, componentized tables/modals, and state styles, but final rendering/polish and UX quality require runtime/manual review.
+- **Evidence:** [`repo/frontend/src/renderer/components/common/Layout.tsx:120`](repo/frontend/src/renderer/components/common/Layout.tsx:120), [`repo/frontend/src/renderer/components/common/DataTable.tsx:51`](repo/frontend/src/renderer/components/common/DataTable.tsx:51), [`repo/frontend/src/renderer/components/common/ContextMenu.tsx:16`](repo/frontend/src/renderer/components/common/ContextMenu.tsx:16).
+- **Manual verification note:** Validate UI behavior on Windows 11 @ 1920x1080 with high-DPI scaling.
 
-10. Visual and Interaction Summary
-- Static code shows basic visual hierarchy and reusable interaction components (tables, modals, empty/loading/error states): `repo/frontend/src/renderer/components/common/DataTable.tsx:34`, `repo/frontend/src/renderer/components/common/Modal.tsx:10`.
-- Several interactions appear wired, including right-click context menus in multiple list pages: `repo/frontend/src/renderer/components/inventory/SKUListPage.tsx:202`, `repo/frontend/src/renderer/components/workorders/WorkOrdersPage.tsx:174`.
-- Cannot confirm final rendering quality, high-DPI behavior, and responsive behavior without execution/manual review.
-- Static blockers remain in route wiring/navigation, so interaction continuity is not fully credible (F-003).
+# 5. Confirmed Blocker / High Findings
 
-11. Next Actions
-- 1) Implement actual Electron desktop architecture (main/preload/tray/multi-window) and MSI packaging to satisfy prompt hard gates (F-001/F-002).
-- 2) Fix broken route map and navigation targets (`/dashboard`, `/stocktakes/:id`, `/system-config`, `/inventory`) and add route tests (F-003).
-- 3) Align statement status machine across handlers, DB constraints, and frontend labels (F-004).
-- 4) Fix inventory adjustment transaction enum to comply with schema (`in`/`out`) and add regression tests (F-005).
-- 5) Correct technician role lookup for auto-dispatch and verify assignment behavior with tests (F-006).
-- 6) Enforce object-level authorization and tenant isolation for work orders/files (F-007).
-- 7) Replace hardcoded secrets/credentials; move encryption key to OS credential storage; encrypt prompt-sensitive fields at rest (F-008).
-- 8) Replace backup placeholder with real backup/update/rollback implementations and explicit success/failure evidence paths (F-009).
+## F-01
+- **Severity:** **High**
+- **Title:** Backup implementation omits managed-file payload despite requirement/design expectation
+- **Conclusion:** **Fail**
+- **Rationale:** Backup endpoint creates only a SQL dump and returns one `.sql` file path; no managed-files archive is included.
+- **Evidence:** [`repo/backend/internal/handlers/system.go:255`](repo/backend/internal/handlers/system.go:255), [`repo/backend/internal/handlers/system.go:270`](repo/backend/internal/handlers/system.go:270), [`docs/design.md:529`](docs/design.md:529)
+- **Impact:** Recovery may restore DB state without attachment corpus, breaking audit bundles/work-order evidence integrity.
+- **Minimum actionable fix:** Extend backup to include managed files (e.g., ZIP of managed storage) and reference both artifacts in backup metadata/status.
+
+## F-02
+- **Severity:** **High**
+- **Title:** Prompt-required table context-menu action contract is inconsistently implemented
+- **Conclusion:** **Fail**
+- **Rationale:** Context menus exist on some tables, but required action set (`quick adjust`, `void`, `print`, `export`) is not consistently available across key modules; Learning table-like items use inline actions only.
+- **Evidence:** [`repo/frontend/src/renderer/components/inventory/SKUListPage.tsx:327`](repo/frontend/src/renderer/components/inventory/SKUListPage.tsx:327), [`repo/frontend/src/renderer/components/workorders/WorkOrdersPage.tsx:283`](repo/frontend/src/renderer/components/workorders/WorkOrdersPage.tsx:283), [`repo/frontend/src/renderer/components/members/MembersPage.tsx:208`](repo/frontend/src/renderer/components/members/MembersPage.tsx:208), [`repo/frontend/src/renderer/components/learning/LearningPage.tsx:473`](repo/frontend/src/renderer/components/learning/LearningPage.tsx:473)
+- **Impact:** Required keyboard/mouse-first operational pattern is not reliable across modules; user workflow consistency suffers.
+- **Minimum actionable fix:** Define a shared context-menu policy per module and ensure all prompt-critical tables expose required actions or explicit role-safe equivalents.
+
+## F-03
+- **Severity:** **High**
+- **Title:** Keyboard shortcut contract (`F2 edit row`) is only partially wired in page handlers
+- **Conclusion:** **Fail**
+- **Rationale:** Global `Layout` emits `medops:edit-row`, but only Users page subscribes; major table pages do not handle it.
+- **Evidence:** [`repo/frontend/src/renderer/components/common/Layout.tsx:92`](repo/frontend/src/renderer/components/common/Layout.tsx:92), [`repo/frontend/src/renderer/components/admin/UsersPage.tsx:44`](repo/frontend/src/renderer/components/admin/UsersPage.tsx:44), [`repo/frontend/src/renderer/components/workorders/WorkOrdersPage.tsx:65`](repo/frontend/src/renderer/components/workorders/WorkOrdersPage.tsx:65), [`repo/frontend/src/renderer/components/members/MembersPage.tsx:52`](repo/frontend/src/renderer/components/members/MembersPage.tsx:52)
+- **Impact:** Prompt-specified keyboard-first workflow is not consistently available in core record grids.
+- **Minimum actionable fix:** Add `medops:edit-row` listeners in each prompt-critical table page with deterministic row selection/edit behavior.
+
+# 6. Other Findings Summary
+
+## F-04
+- **Severity:** Medium
+- **Conclusion:** Authenticated frontend state depends on stored `medops_user` object, not token validity until API use.
+- **Evidence:** [`repo/frontend/src/renderer/hooks/useAuth.ts:6`](repo/frontend/src/renderer/hooks/useAuth.ts:6), [`repo/frontend/src/renderer/hooks/useAuth.ts:43`](repo/frontend/src/renderer/hooks/useAuth.ts:43)
+- **Minimum actionable fix:** Derive auth state from token + `/auth/me` bootstrap or signed session validity check before protected-route rendering.
+
+## F-05
+- **Severity:** Medium
+- **Conclusion:** README verification path is mixed (Docker-first + desktop mode) and can confuse acceptance flow for offline desktop requirements.
+- **Evidence:** [`repo/README.md:21`](repo/README.md:21), [`repo/README.md:55`](repo/README.md:55), [`repo/README.md:243`](repo/README.md:243)
+- **Minimum actionable fix:** Add a single authoritative acceptance verification path for packaged desktop mode, separate from dev/docker flows.
+
+## F-06
+- **Severity:** Low
+- **Conclusion:** Login logging includes username on failed attempts.
+- **Evidence:** [`repo/backend/internal/handlers/auth.go:47`](repo/backend/internal/handlers/auth.go:47), [`repo/backend/internal/handlers/auth.go:54`](repo/backend/internal/handlers/auth.go:54)
+- **Minimum actionable fix:** Keep audit utility but consider rate-limited/obfuscated username logging policy.
+
+# 7. Security Review Summary
+
+- **Authentication entry points:** **Pass**
+  - Login/change-password policy + lockout implemented.
+  - Evidence: [`repo/backend/internal/handlers/auth.go:28`](repo/backend/internal/handlers/auth.go:28), [`repo/backend/internal/handlers/auth.go:70`](repo/backend/internal/handlers/auth.go:70), [`repo/backend/internal/handlers/auth.go:190`](repo/backend/internal/handlers/auth.go:190)
+
+- **Route-level authorization:** **Pass**
+  - Route groups apply auth middleware and role middleware.
+  - Evidence: [`repo/backend/cmd/server/main.go:148`](repo/backend/cmd/server/main.go:148), [`repo/backend/cmd/server/main.go:156`](repo/backend/cmd/server/main.go:156), [`repo/backend/cmd/server/main.go:249`](repo/backend/cmd/server/main.go:249)
+
+- **Object-level authorization:** **Pass**
+  - Work-order and file download checks include object-level predicates.
+  - Evidence: [`repo/backend/internal/handlers/workorders.go:249`](repo/backend/internal/handlers/workorders.go:249), [`repo/backend/internal/handlers/files.go:217`](repo/backend/internal/handlers/files.go:217), [`repo/backend/internal/handlers/files.go:297`](repo/backend/internal/handlers/files.go:297)
+
+- **Function-level authorization:** **Pass**
+  - Sensitive-member reveal endpoint segregated and admin-gated by route middleware.
+  - Evidence: [`repo/backend/internal/handlers/members.go:304`](repo/backend/internal/handlers/members.go:304), [`repo/backend/cmd/server/main.go:213`](repo/backend/cmd/server/main.go:213)
+
+- **Tenant / user data isolation:** **Pass**
+  - Tenant predicates are pervasive in repository SQL and covered by tenant tests.
+  - Evidence: [`repo/backend/internal/repository/repository.go:87`](repo/backend/internal/repository/repository.go:87), [`repo/backend/internal/repository/repository.go:819`](repo/backend/internal/repository/repository.go:819), [`repo/backend/internal/repository/tenant_test.go:211`](repo/backend/internal/repository/tenant_test.go:211)
+
+- **Admin/internal/debug endpoint protection:** **Partial Pass**
+  - Admin/system endpoints are role-gated; reminder endpoints are intentionally auth-only (documented by comments).
+  - Evidence: [`repo/backend/cmd/server/main.go:222`](repo/backend/cmd/server/main.go:222), [`repo/backend/cmd/server/main.go:249`](repo/backend/cmd/server/main.go:249)
+  - Note: auth-only reminder endpoints are acceptable by design but should remain limited to non-sensitive payloads.
+
+# 8. Tests and Logging Review
+
+- **Unit tests:** **Pass**
+  - Backend unit suites for handlers/security and repository transactional/tenant logic exist.
+  - Evidence: [`repo/backend/internal/handlers/handlers_test.go:16`](repo/backend/internal/handlers/handlers_test.go:16), [`repo/backend/internal/handlers/security_test.go:16`](repo/backend/internal/handlers/security_test.go:16), [`repo/backend/internal/repository/statement_tx_test.go:198`](repo/backend/internal/repository/statement_tx_test.go:198)
+
+- **API/integration tests:** **Partial Pass**
+  - Rich handler-level integration tests exist; shell integration script exists but was not run.
+  - Evidence: [`repo/backend/internal/handlers/authz_integration_test.go:413`](repo/backend/internal/handlers/authz_integration_test.go:413), [`repo/backend/internal/handlers/authz_integration_test.go:520`](repo/backend/internal/handlers/authz_integration_test.go:520), [`repo/run_tests.sh:1`](repo/run_tests.sh:1)
+
+- **Logging categories / observability:** **Pass**
+  - Structured request logging middleware and domain logs are present.
+  - Evidence: [`repo/backend/internal/middleware/middleware.go:191`](repo/backend/internal/middleware/middleware.go:191), [`repo/backend/internal/handlers/workorders.go:401`](repo/backend/internal/handlers/workorders.go:401)
+
+- **Sensitive leakage risk in logs/responses:** **Partial Pass**
+  - Sensitive member fields are masked by default and encrypted columns exist, but some auth logs include usernames.
+  - Evidence: [`repo/backend/internal/handlers/members.go:85`](repo/backend/internal/handlers/members.go:85), [`repo/backend/migrations/000005_sensitive_fields.up.sql:2`](repo/backend/migrations/000005_sensitive_fields.up.sql:2), [`repo/backend/internal/handlers/auth.go:54`](repo/backend/internal/handlers/auth.go:54)
+
+# 9. Test Coverage Assessment (Static Audit)
+
+## 9.1 Test Overview
+- Unit tests exist for backend handlers/repository and frontend utility/component behavior.
+- Frontend tests use Vitest + React Testing Library via `npm test`.
+- Backend tests are Go `testing` suites.
+- Test entry points are documented in README and scripts.
+- Evidence: [`repo/frontend/package.json:9`](repo/frontend/package.json:9), [`repo/backend/internal/handlers/authz_integration_test.go:413`](repo/backend/internal/handlers/authz_integration_test.go:413), [`repo/backend/internal/repository/tenant_test.go:211`](repo/backend/internal/repository/tenant_test.go:211), [`repo/README.md:76`](repo/README.md:76)
+
+## 9.2 Coverage Mapping Table
+| Requirement / Risk Point | Mapped Test Case(s) | Key Assertion / Fixture / Mock | Coverage | Gap | Minimum Test Addition |
+|---|---|---|---|---|---|
+| Auth 401 for missing/invalid token | `authz_integration_test.go:413`, `:430` | Expects `StatusUnauthorized` | sufficient | None major | N/A |
+| Role-level 403 enforcement | `authz_integration_test.go:477`, `:497` | `RequireRole` wrong/correct role expectations | sufficient | None major | N/A |
+| Object-level auth for work orders/files | `authz_integration_test.go:186`, `:320`, `:917` | 403 on unrelated user; secondary file auth path | sufficient | None major | N/A |
+| Tenant isolation at repository SQL level | `tenant_test.go:211`, `:242`, `:480`, `:518` | SQL capture asserts `tenant_id` + bound tenant arg | sufficient | Does not runtime-verify DB policies | Add small DB-backed cross-tenant negative test for representative endpoints |
+| Inventory validation (expired/insufficient/negative) | `handlers_test.go:194`, `run_tests.sh:292`, `run_tests.sh:313` | 400 responses for invalid receive/dispense | basically covered | Limited static proof on all edge cases | Add explicit tests for borderline expiry date and zero/negative quantities across all operations |
+| Membership strict redemption/refund constraints | code has logic, tests sparse | No strong direct tests found for partial-session/7-day-unused rules | insufficient | Critical policy could regress silently | Add backend tests for session partial-amount rejection semantics and refund eligibility boundaries |
+| Charges reconciliation and two-step approval | `security_test.go:130`, `:154`, `:206`; `routes.test.ts:345` | Pending?reconciled?approved gates and threshold behavior | basically covered | End-to-end API path assertions limited | Add API-level tests for >$25 note required and approver identity separation |
+| Draft autosave every 30s and recovery | `draft.test.ts:20`, `:33`; hook at `useDraftAutoSave.ts:15` | Timer interval + save/restore cycle assertions | sufficient | N/A | N/A |
+| Prompt keyboard/context-menu contract | `routes.test.ts:379` (event dispatch only) | Verifies event dispatch shape, not page handlers | missing | Core UX contract regression not guarded | Add page-level tests asserting F2/Ctrl+N/Ctrl+Enter and context-menu action presence per module |
+| Backup contains DB + files | none found | No test proving managed-file inclusion in backup | missing | High-risk recovery gap undetected by tests | Add handler/repository test asserting backup manifest includes file archive artifact |
+
+## 9.3 Security Coverage Audit
+- **Authentication:** **covered** (401/invalid token/deactivated/locked scenarios tested).
+  - Evidence: [`repo/backend/internal/handlers/authz_integration_test.go:413`](repo/backend/internal/handlers/authz_integration_test.go:413), [`repo/backend/internal/handlers/authz_integration_test.go:1042`](repo/backend/internal/handlers/authz_integration_test.go:1042)
+- **Route authorization:** **covered**
+  - Evidence: [`repo/backend/internal/handlers/authz_integration_test.go:477`](repo/backend/internal/handlers/authz_integration_test.go:477)
+- **Object-level authorization:** **covered**
+  - Evidence: [`repo/backend/internal/handlers/authz_integration_test.go:186`](repo/backend/internal/handlers/authz_integration_test.go:186), [`repo/backend/internal/handlers/authz_integration_test.go:917`](repo/backend/internal/handlers/authz_integration_test.go:917)
+- **Tenant/data isolation:** **partially covered**
+  - Evidence: [`repo/backend/internal/repository/tenant_test.go:211`](repo/backend/internal/repository/tenant_test.go:211)
+  - Reason: SQL-level guard coverage is strong, but no full request-level multi-tenant runtime test was executed here.
+- **Admin/internal protection:** **covered**
+  - Evidence: [`repo/backend/internal/handlers/authz_integration_test.go:520`](repo/backend/internal/handlers/authz_integration_test.go:520), [`repo/backend/internal/handlers/authz_integration_test.go:1465`](repo/backend/internal/handlers/authz_integration_test.go:1465)
+
+## 9.4 Final Coverage Judgment
+- **Final coverage judgment:** **Partial Pass**
+- Major authz/tenant/security paths are strongly tested statically, but prompt-critical UX contract tests and backup-content tests are missing; severe defects in those areas could still pass existing suites.
+
+# 10. Frontend Static Architecture Addendum
+
+## 10.1 Frontend Verdict
+- **Partial Pass**
+
+## 10.2 High / Blocker Coverage Panel
+- **A. Prompt-fit / completeness blockers:** **Fail**
+  - Reason: interaction contract gaps (context menu + F2 behavior) in key pages.
+  - Findings: F-02, F-03.
+- **B. Static delivery / structure blockers:** **Pass**
+  - Reason: coherent router/app shell/page wiring.
+  - Evidence: [`repo/frontend/src/renderer/App.tsx:46`](repo/frontend/src/renderer/App.tsx:46), [`repo/frontend/src/renderer/routeConfig.ts:16`](repo/frontend/src/renderer/routeConfig.ts:16).
+- **C. Frontend-controllable interaction/state blockers:** **Partial Pass**
+  - Reason: many loading/error/submitting states exist, but keyboard/context consistency gap remains.
+  - Evidence: [`repo/frontend/src/renderer/components/workorders/WorkOrdersPage.tsx:246`](repo/frontend/src/renderer/components/workorders/WorkOrdersPage.tsx:246), [`repo/frontend/src/renderer/components/learning/LearningPage.tsx:467`](repo/frontend/src/renderer/components/learning/LearningPage.tsx:467).
+- **D. Data exposure / delivery-risk blockers:** **Partial Pass**
+  - Reason: no hardcoded production secrets found; session state relies on local user object for auth gate before API validation.
+  - Evidence: [`repo/frontend/src/renderer/hooks/useAuth.ts:6`](repo/frontend/src/renderer/hooks/useAuth.ts:6), [`repo/frontend/src/main/main.ts:312`](repo/frontend/src/main/main.ts:312).
+- **E. Test-critical gaps:** **Partial Pass**
+  - Reason: frontend tests exist but do not protect key shortcut/context prompt contract end-to-end.
+  - Evidence: [`repo/frontend/src/renderer/routes.test.ts:379`](repo/frontend/src/renderer/routes.test.ts:379), [`repo/frontend/src/renderer/__tests__/components.test.tsx:812`](repo/frontend/src/renderer/__tests__/components.test.tsx:812).
+
+## 10.3 Data Exposure and Delivery Risk Summary
+- **Real sensitive exposure:** **Pass** (no embedded prod tokens/keys identified).
+- **Hidden debug/demo surfaces:** **Pass** (no undisclosed debug bypass found).
+- **Undisclosed mock scope/default mock behavior:** **Pass** (tests use mocks; app code uses real service layer).
+- **Fake-success masking:** **Partial Pass** (some flows use alerts/prompts and optimistic UX, but no broad fake-success framework detected).
+- **UI/console/storage leakage risk:** **Partial Pass** (local auth-state reliance on `medops_user`; login logs include usernames).
+
+## 10.4 Visual and Interaction Summary (static weak judgment)
+- Static structure supports a coherent layout, table components, modals, and interaction states.
+- Definitive visual quality, DPI rendering, and transition behavior cannot be confirmed without manual runtime verification.
+- Evidence: [`repo/frontend/src/renderer/components/common/Layout.tsx:120`](repo/frontend/src/renderer/components/common/Layout.tsx:120), [`repo/frontend/src/renderer/components/common/DataTable.tsx:18`](repo/frontend/src/renderer/components/common/DataTable.tsx:18).
+
+# 11. Next Actions
+1. Fix backup scope to include managed-files archive and restore path parity (F-01).
+2. Enforce a shared right-click action contract for prompt-critical tables (F-02).
+3. Implement `F2` edit-row listeners in all relevant table pages (F-03).
+4. Add automated tests for keyboard/context-menu prompt contract across key pages.
+5. Add backup-content tests that assert DB + file artifacts are both produced.
+6. Harden frontend auth bootstrap to verify session validity before protected-route trust.
+7. Split README into clearly separated acceptance paths: packaged desktop vs dev/docker.
+
+## Final Notes
+- All conclusions are static-only and evidence-based.
+- Runtime behavior, performance, and installer outcomes remain manual verification items.

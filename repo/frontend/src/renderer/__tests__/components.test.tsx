@@ -50,6 +50,7 @@ const mockMembersTransactions = vi.hoisted(() =>
 const mockMembersCreatePackage = vi.hoisted(() => vi.fn());
 const mockStocktakeList = vi.hoisted(() => vi.fn());
 const mockStocktakeCreate = vi.hoisted(() => vi.fn());
+const mockChangePassword = vi.hoisted(() => vi.fn());
 
 vi.mock('../services/api', () => ({
   // Default export: the raw axios instance used directly by DraftRecoveryDialog.
@@ -63,6 +64,7 @@ vi.mock('../services/api', () => ({
     login: vi.fn(),
     logout: vi.fn(),
     me: vi.fn(),
+    changePassword: mockChangePassword,
   },
   skusAPI: {
     getLowStock: vi.fn().mockResolvedValue({ data: { data: [] } }),
@@ -883,5 +885,173 @@ describe('StocktakePage — history list (F-005)', () => {
     await waitFor(() => {
       expect(screen.getByText(/stocktake history/i)).toBeTruthy();
     });
+  });
+});
+
+// ─── ForcePasswordChangePage — packaged-routing / reload-safe navigation ──────
+//
+// After a successful password change, the page must call window.location.reload()
+// rather than window.location.href = '/' so the navigation is safe for both
+// packaged Electron (file:// origin) and dev/web (http://localhost) modes.
+// window.location.href = '/' resolves to file:///  in packaged mode and can
+// break routing; window.location.reload() is always safe.
+
+import ForcePasswordChangePage from '../components/admin/ForcePasswordChangePage';
+
+describe('ForcePasswordChangePage', () => {
+  let reloadSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    localStorage.clear();
+    mockUseAuth.user = { id: 'u-force', username: 'nurse1', role: 'front_desk' } as any;
+    mockUseAuth.isAuthenticated = true;
+    mockChangePassword.mockReset();
+    // Spy on window.location.reload — jsdom does not implement it by default.
+    reloadSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      value: { ...window.location, reload: reloadSpy },
+      writable: true,
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  function renderForcePage() {
+    return render(
+      <MemoryRouter>
+        <ForcePasswordChangePage />
+      </MemoryRouter>,
+    );
+  }
+
+  it('renders the force-password-change form', () => {
+    renderForcePage();
+    expect(screen.getByText(/you must change your password/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /change password/i })).toBeTruthy();
+  });
+
+  it('shows error when current password is empty', async () => {
+    renderForcePage();
+    fireEvent.click(screen.getByRole('button', { name: /change password/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/current password is required/i)).toBeTruthy();
+    });
+    expect(mockChangePassword).not.toHaveBeenCalled();
+  });
+
+  it('shows error when new password is shorter than 12 characters', async () => {
+    renderForcePage();
+    const inputs = document.querySelectorAll('input[type="password"]');
+    fireEvent.change(inputs[0], { target: { value: 'OldPass1234!' } });
+    fireEvent.change(inputs[1], { target: { value: 'Short1!' } });
+    fireEvent.change(inputs[2], { target: { value: 'Short1!' } });
+    fireEvent.click(screen.getByRole('button', { name: /change password/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/at least 12 characters/i)).toBeTruthy();
+    });
+    expect(mockChangePassword).not.toHaveBeenCalled();
+  });
+
+  it('shows error when new passwords do not match', async () => {
+    renderForcePage();
+    const inputs = document.querySelectorAll('input[type="password"]');
+    fireEvent.change(inputs[0], { target: { value: 'OldPass1234!' } });
+    fireEvent.change(inputs[1], { target: { value: 'NewPassword123!' } });
+    fireEvent.change(inputs[2], { target: { value: 'Different123!' } });
+    fireEvent.click(screen.getByRole('button', { name: /change password/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/passwords do not match/i)).toBeTruthy();
+    });
+    expect(mockChangePassword).not.toHaveBeenCalled();
+  });
+
+  it('shows error when new password equals current password', async () => {
+    renderForcePage();
+    const inputs = document.querySelectorAll('input[type="password"]');
+    fireEvent.change(inputs[0], { target: { value: 'SamePassword123!' } });
+    fireEvent.change(inputs[1], { target: { value: 'SamePassword123!' } });
+    fireEvent.change(inputs[2], { target: { value: 'SamePassword123!' } });
+    fireEvent.click(screen.getByRole('button', { name: /change password/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/must differ/i)).toBeTruthy();
+    });
+    expect(mockChangePassword).not.toHaveBeenCalled();
+  });
+
+  it('on success: calls changePassword, updates localStorage, and calls window.location.reload()', async () => {
+    mockChangePassword.mockResolvedValueOnce({ data: {} });
+
+    renderForcePage();
+    const inputs = document.querySelectorAll('input[type="password"]');
+    fireEvent.change(inputs[0], { target: { value: 'OldPass1234!' } });
+    fireEvent.change(inputs[1], { target: { value: 'NewPassword123!!' } });
+    fireEvent.change(inputs[2], { target: { value: 'NewPassword123!!' } });
+    fireEvent.click(screen.getByRole('button', { name: /change password/i }));
+
+    await waitFor(() => {
+      expect(mockChangePassword).toHaveBeenCalledWith('OldPass1234!', 'NewPassword123!!');
+    });
+
+    // localStorage must be updated with must_change_password: false
+    const stored = JSON.parse(localStorage.getItem('medops_user') || '{}');
+    expect(stored.must_change_password).toBe(false);
+
+    // Must use reload() — NOT window.location.href = '/' (file:// unsafe)
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('on success: does NOT set window.location.href (packaged file:// safety)', async () => {
+    mockChangePassword.mockResolvedValueOnce({ data: {} });
+
+    // Track any href assignment attempt
+    let hrefSet = false;
+    const locationDescriptor = Object.getOwnPropertyDescriptor(window, 'location')!;
+    Object.defineProperty(window, 'location', {
+      value: {
+        ...window.location,
+        reload: reloadSpy,
+        set href(_: string) { hrefSet = true; },
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    renderForcePage();
+    const inputs = document.querySelectorAll('input[type="password"]');
+    fireEvent.change(inputs[0], { target: { value: 'OldPass1234!' } });
+    fireEvent.change(inputs[1], { target: { value: 'NewPassword123!!' } });
+    fireEvent.change(inputs[2], { target: { value: 'NewPassword123!!' } });
+    fireEvent.click(screen.getByRole('button', { name: /change password/i }));
+
+    await waitFor(() => {
+      expect(reloadSpy).toHaveBeenCalled();
+    });
+
+    expect(hrefSet).toBe(false);
+
+    // Restore
+    Object.defineProperty(window, 'location', locationDescriptor);
+  });
+
+  it('shows API error message when changePassword call fails', async () => {
+    mockChangePassword.mockRejectedValueOnce({
+      response: { data: { error: 'Incorrect current password' } },
+    });
+
+    renderForcePage();
+    const inputs = document.querySelectorAll('input[type="password"]');
+    fireEvent.change(inputs[0], { target: { value: 'WrongOld1234!' } });
+    fireEvent.change(inputs[1], { target: { value: 'NewPassword123!!' } });
+    fireEvent.change(inputs[2], { target: { value: 'NewPassword123!!' } });
+    fireEvent.click(screen.getByRole('button', { name: /change password/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/incorrect current password/i)).toBeTruthy();
+    });
+    expect(reloadSpy).not.toHaveBeenCalled();
   });
 });
