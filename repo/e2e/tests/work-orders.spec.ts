@@ -50,8 +50,14 @@ test.describe('Work-order lifecycle — UI-driven create + transitions', () => {
     // Submit.
     await page.getByRole('button', { name: /^create work order$/i }).click();
 
-    // UI outcome: modal closes and the new row appears in the list.
-    await expect(page.getByText(description).first()).toBeVisible({ timeout: 15_000 });
+    // UI outcome: the modal closes on a successful create (the "New Work Order"
+    // heading disappears), and the `location` value we typed shows up in the
+    // WO table. The WO list DOES NOT render `description` as a column
+    // (columns are id/trade/priority/status/location/sla/assigned_to per
+    // WorkOrdersPage.tsx), so we assert on location which is a rendered column.
+    await expect(page.getByRole('heading', { name: 'New Work Order' }))
+      .toBeHidden({ timeout: 15_000 });
+    await expect(page.getByText('UI Test Bldg').first()).toBeVisible({ timeout: 15_000 });
 
     // Backend assertion: the WO really exists in the DB with the fields we typed.
     const { api } = await adminApi();
