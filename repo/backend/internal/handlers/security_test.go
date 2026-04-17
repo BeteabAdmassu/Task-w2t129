@@ -20,10 +20,13 @@ func TestCanViewWorkOrder_SubmitterCanView(t *testing.T) {
 	}
 }
 
-func TestCanViewWorkOrder_AssigneeCanView(t *testing.T) {
-	assignee := "tech-user"
-	if !canViewWorkOrder("tech-user", "front_desk", "submitter-user", &assignee) {
-		t.Error("assigned technician should be able to view the work order")
+// H-04 fix: assignee-based view access is ONLY granted to maintenance_tech
+// role. Other roles (e.g. front_desk) still require being the submitter —
+// being assigned as the point of contact does not grant view rights.
+func TestCanViewWorkOrder_FrontDeskAssigneeWithoutSubmit_IsDenied(t *testing.T) {
+	assignee := "frontdesk-user"
+	if canViewWorkOrder("frontdesk-user", "front_desk", "submitter-user", &assignee) {
+		t.Error("front_desk assignee (not submitter) must NOT be able to view (H-04)")
 	}
 }
 

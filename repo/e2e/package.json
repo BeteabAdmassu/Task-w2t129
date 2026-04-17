@@ -1,0 +1,16 @@
+{
+  "name": "medops-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright end-to-end tests for MedOps — real UI -> real API -> real DB, no mocks.",
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.1",
+    "@types/node": "^20.14.0",
+    "typescript": "^5.4.5"
+  }
+}

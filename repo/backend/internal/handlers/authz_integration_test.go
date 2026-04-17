@@ -625,13 +625,21 @@ func TestUpdateWorkOrder_CancelledStatus_IsAccepted(t *testing.T) {
 
 // TestCloseWorkOrder_CancelledOrder_IsRejected verifies that the close endpoint
 // rejects a work order that has already been cancelled.
+// The WO is assigned to the caller so the authz check passes — the only
+// rejection under test is the state-machine guard (cancelled → closed).
 func TestCloseWorkOrder_CancelledOrder_IsRejected(t *testing.T) {
-	wo := &models.WorkOrder{ID: "wo-cancel-02", SubmittedBy: "uid-sub", Status: "cancelled"}
+	techID := "uid-tech"
+	wo := &models.WorkOrder{
+		ID:          "wo-cancel-02",
+		SubmittedBy: "uid-sub",
+		AssignedTo:  &techID,
+		Status:      "cancelled",
+	}
 	store := &stubWorkOrderStore{wo: wo}
 	h := &WorkOrderHandler{repo: store}
 
 	body := `{"parts_cost":0,"labor_cost":0}`
-	c, rec := echoCtxWithBody(http.MethodPost, "/work-orders/wo-cancel-02/close", "uid-tech", "maintenance_tech", body)
+	c, rec := echoCtxWithBody(http.MethodPost, "/work-orders/wo-cancel-02/close", techID, "maintenance_tech", body)
 	c.SetParamNames("id")
 	c.SetParamValues("wo-cancel-02")
 
@@ -639,19 +647,27 @@ func TestCloseWorkOrder_CancelledOrder_IsRejected(t *testing.T) {
 		t.Fatalf("unexpected handler error: %v", err)
 	}
 	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for cancelled order; got %d", rec.Code)
+		t.Errorf("expected 400 for cancelled order; got %d — body: %s", rec.Code, rec.Body.String())
 	}
 }
 
 // TestUpdateWorkOrder_AdvanceFromCancelled_IsRejected verifies that a cancelled
 // work order cannot be advanced to another status (no resurrection).
+// Assigns to caller so authz passes; the only check under test is the
+// state-machine guard refusing transitions out of "cancelled".
 func TestUpdateWorkOrder_AdvanceFromCancelled_IsRejected(t *testing.T) {
-	wo := &models.WorkOrder{ID: "wo-cancel-03", SubmittedBy: "uid-sub", Status: "cancelled"}
+	techID := "uid-tech"
+	wo := &models.WorkOrder{
+		ID:          "wo-cancel-03",
+		SubmittedBy: "uid-sub",
+		AssignedTo:  &techID,
+		Status:      "cancelled",
+	}
 	store := &stubWorkOrderStore{wo: wo}
 	h := &WorkOrderHandler{repo: store}
 
 	body := `{"status":"in_progress"}`
-	c, rec := echoCtxWithBody(http.MethodPut, "/work-orders/wo-cancel-03", "uid-tech", "maintenance_tech", body)
+	c, rec := echoCtxWithBody(http.MethodPut, "/work-orders/wo-cancel-03", techID, "maintenance_tech", body)
 	c.SetParamNames("id")
 	c.SetParamValues("wo-cancel-03")
 

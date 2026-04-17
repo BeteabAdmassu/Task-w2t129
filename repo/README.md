@@ -65,26 +65,37 @@ docker compose down
 
 ### Running Tests
 
+The `run_tests.sh` orchestrator drives three layers of tests — all fully containerised:
+
+1. **HTTP API integration** (host `curl` → real backend) covering auth, RBAC, inventory, learning, work orders, members, charges, system config, **drafts, file upload/download, stocktakes, full statement lifecycle with two-user approval, work-order photo linking, reminders**
+2. **Backend Go unit + handler tests** executed inside a `golang:1.22-alpine` throwaway container (no Go needed on host)
+3. **Playwright end-to-end** tests executed inside `mcr.microsoft.com/playwright` — a real Chromium drives the real UI, which makes real API calls, which write to the real database (no mocks)
+
 ```bash
-# Make sure services are running first
+# Start the services
 docker compose up --build -d
 
-# Run integration tests from the host
+# Run the full test suite (API + Go + Playwright E2E, all inside Docker)
 ./run_tests.sh
 ```
 
-### Unit Tests (without Docker)
+Host dependencies: only `docker`, `docker compose`, `bash`, `curl`, and `jq`.
 
-**Backend** (requires Go 1.22+ and a running PostgreSQL or test DB):
+### Running individual test layers
+
+**Playwright E2E only** (services must be up):
 ```bash
-cd backend
-go test ./...
+docker compose --profile test run --rm e2e
 ```
 
-**Frontend** (requires Node.js 18+):
+**Backend Go tests only** (no Go on host required):
 ```bash
-cd frontend
-npm test
+docker compose --profile test run --rm backend-tests
+```
+
+**Frontend Vitest** (requires Node.js 18+, for local dev):
+```bash
+cd frontend && npm test
 ```
 
 ## Environment Variables
