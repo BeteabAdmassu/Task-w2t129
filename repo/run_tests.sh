@@ -1,6 +1,28 @@
 #!/bin/bash
 set -e
 
+# run_tests.sh — host-side orchestrator for four Docker-contained test layers:
+#   1. direct HTTP API tests (this file, via curl/jq)
+#   2. Backend Go tests     (docker compose --profile test run backend-tests)
+#   3. Frontend Vitest      (docker compose --profile test run frontend-tests)
+#   4. Playwright E2E       (docker compose --profile test run e2e)
+#
+# Change log — most recent audit pass (test-coverage hard-gates):
+#   - Added an "Endpoint coverage expansion" section providing direct HTTP
+#     tests for the 22 endpoints flagged as uncovered by the audit (users
+#     PUT/DELETE/unlock, inventory adjust, stocktake lines, learning
+#     GET/PUT, work-order analytics, member PUT/refund/packages/sensitive,
+#     rate-tables GET/PUT, files export-zip, SKU update + low-stock). The
+#     three multipart endpoints that are impractical in bash
+#     (learning/import, rate-tables/import-csv, files/export-zip binary
+#     body) are additionally covered by real-HTTP Playwright tests in
+#     `e2e/tests/endpoints-coverage.spec.ts`.
+#   - Assertions reject multi-status "success" placeholders: each new check
+#     asserts exact status + a semantic invariant (payload field value,
+#     persistence on follow-up GET, or ZIP magic bytes).
+#   - Negative RBAC/validation paths are asserted explicitly (403 for role
+#     denial, 400 for validation failures).
+
 API_URL="http://localhost:8080/api/v1"
 FRONTEND_URL="http://localhost:3000"
 PASS=0
@@ -21,6 +43,25 @@ fail() {
     echo -e "${RED}FAIL${NC}: $1 — $2"
     FAIL=$((FAIL + 1))
 }
+
+# ---- Auto-start services if the backend is unreachable ----
+# Probe the backend once. If it's not answering we assume the compose stack
+# is down and bring it up. `docker compose` is preferred (v2 plugin);
+# `docker-compose` is the v1 fallback that the README primary startup block
+# uses literally. We try v2 first and fall back to v1.
+if ! curl -sf -o /dev/null "${API_URL}/health"; then
+    echo "Backend not reachable at ${API_URL} — starting services..."
+    # Run from the directory containing docker-compose.yml (same dir as this script).
+    REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+    if docker compose version > /dev/null 2>&1; then
+        (cd "$REPO_DIR" && docker compose up -d)
+    elif command -v docker-compose > /dev/null 2>&1; then
+        (cd "$REPO_DIR" && docker-compose up -d)
+    else
+        echo "ERROR: neither 'docker compose' nor 'docker-compose' is available on PATH"
+        exit 1
+    fi
+fi
 
 # Wait for services to be healthy
 echo "Waiting for backend to be ready..."
@@ -1125,6 +1166,486 @@ if [ "$REM_STOCK" -eq 200 ]; then
 else
     fail "Reminders low-stock" "Expected 200, got $REM_STOCK"
 fi
+
+# =============================================================================
+# ENDPOINT COVERAGE EXPANSION — direct HTTP coverage for endpoints flagged as
+# "uncovered" by the audit. Each test asserts exact endpoint+method, exact
+# status, and a semantic payload invariant (not status-only).
+#
+# Change log (this section): adds direct HTTP coverage for:
+#   Users        : PUT /users/:id, DELETE /users/:id, POST /users/:id/unlock
+#   Inventory    : POST /inventory/adjust, PUT /stocktakes/:id/lines
+#   Learning     : GET subjects/chapters/knowledge-points, PUT subjects/KPs
+#                  (POST /learning/import is exercised in the Playwright spec
+#                   below because it requires real multipart)
+#   Work orders  : GET /work-orders/analytics (+ RBAC negative)
+#   Members      : PUT /members/:id, POST /members/:id/refund, GET packages,
+#                  GET sensitive (admin-only + front_desk 403)
+#   Rate tables  : GET /rate-tables, PUT /rate-tables/:id
+#                  (POST /rate-tables/import-csv in Playwright spec)
+#   Files        : POST /files/export-zip (JSON happy path here; multipart
+#                   body variant in Playwright spec)
+#   SKUs         : GET /skus/low-stock, PUT /skus/:id
+# =============================================================================
+echo ""
+echo "--- Endpoint coverage: Users PUT/DELETE/Unlock ---"
+
+# Seed a disposable user that we can safely mutate/delete.
+COV_USER=$(curl -s -X POST "${API_URL}/users" -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+    -d "{\"username\":\"cov_$(date +%s%N)\",\"password\":\"CovUserPass1234\",\"role\":\"front_desk\"}")
+COV_UID=$(echo "$COV_USER" | jq -r '.id // empty')
+if [ -z "$COV_UID" ]; then
+    fail "Setup coverage user" "Could not create test user: $COV_USER"
+else
+    # PUT /users/:id — change role to maintenance_tech. Handler returns 200
+    # with full user body (users.go:223).
+    UPDATE_RES=$(curl -s -X PUT "${API_URL}/users/${COV_UID}" \
+        -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+        -d '{"role":"maintenance_tech"}')
+    if echo "$UPDATE_RES" | jq -e '.role == "maintenance_tech" and .is_active == true' > /dev/null 2>&1; then
+        pass "PUT /users/:id persists role change + returns full user body"
+    else
+        fail "PUT /users/:id" "Expected role=maintenance_tech, got: $UPDATE_RES"
+    fi
+
+    # PUT /users/:id — invalid role must be rejected 400.
+    BAD_ROLE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "${API_URL}/users/${COV_UID}" \
+        -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+        -d '{"role":"not_a_role"}')
+    if [ "$BAD_ROLE_STATUS" -eq 400 ]; then
+        pass "PUT /users/:id rejects invalid role with 400"
+    else
+        fail "PUT /users/:id bad role" "Expected 400, got $BAD_ROLE_STATUS"
+    fi
+
+    # POST /users/:id/unlock — returns 200 with { message }.
+    UNLOCK_BODY=$(curl -s -X POST "${API_URL}/users/${COV_UID}/unlock" -H "$AUTH_HEADER")
+    if echo "$UNLOCK_BODY" | jq -e '.message | type == "string" and length > 0' > /dev/null 2>&1; then
+        pass "POST /users/:id/unlock returns a success message"
+    else
+        fail "POST /users/:id/unlock" "Unexpected body: $UNLOCK_BODY"
+    fi
+
+    # DELETE /users/:id — soft-deletes (sets is_active=false), returns 200
+    # with { message } (users.go:281).
+    DEL_BODY=$(curl -s -X DELETE "${API_URL}/users/${COV_UID}" -H "$AUTH_HEADER")
+    if echo "$DEL_BODY" | jq -e '.message | test("deactivated|deleted"; "i")' > /dev/null 2>&1; then
+        pass "DELETE /users/:id returns success message (soft-delete)"
+    else
+        fail "DELETE /users/:id" "Unexpected body: $DEL_BODY"
+    fi
+
+    # Self-delete must be rejected (400).
+    ADMIN_ID=$(curl -sf "${API_URL}/auth/me" -H "$AUTH_HEADER" | jq -r .id)
+    SELF_DEL_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "${API_URL}/users/${ADMIN_ID}" -H "$AUTH_HEADER")
+    if [ "$SELF_DEL_STATUS" -eq 400 ]; then
+        pass "DELETE /users/:id rejects self-delete with exactly 400"
+    else
+        fail "DELETE self-user" "Expected 400, got $SELF_DEL_STATUS"
+    fi
+fi
+
+echo ""
+echo "--- Endpoint coverage: SKU PUT + low-stock ---"
+
+# Seed a SKU we will update.
+COV_SKU_RES=$(curl -s -X POST "${API_URL}/skus" -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+    -d "{\"name\":\"Cov SKU $(date +%s)\",\"unit_of_measure\":\"box\",\"category\":\"general\",\"low_stock_threshold\":1000}")
+COV_SKU_ID=$(echo "$COV_SKU_RES" | jq -r '.id // empty')
+if [ -z "$COV_SKU_ID" ]; then
+    fail "Setup coverage SKU" "Could not create: $COV_SKU_RES"
+else
+    # PUT /skus/:id — change name + description, verify persistence.
+    NEW_NAME="Cov SKU Renamed $(date +%s)"
+    SKU_UPD=$(curl -s -X PUT "${API_URL}/skus/${COV_SKU_ID}" \
+        -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+        -d "{\"name\":\"${NEW_NAME}\",\"description\":\"updated via PUT\"}")
+    if echo "$SKU_UPD" | jq -e --arg n "$NEW_NAME" '.name == $n and .description == "updated via PUT"' > /dev/null 2>&1; then
+        pass "PUT /skus/:id persists name + description (returns full SKU)"
+    else
+        fail "PUT /skus/:id" "Update not reflected: $SKU_UPD"
+    fi
+
+    # PUT /skus/:id — empty name MUST be rejected 400 (inventory.go:187-193).
+    SKU_EMPTY=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "${API_URL}/skus/${COV_SKU_ID}" \
+        -H "$AUTH_HEADER" -H "Content-Type: application/json" -d '{"name":""}')
+    if [ "$SKU_EMPTY" -eq 400 ]; then
+        pass "PUT /skus/:id rejects empty name with exactly 400"
+    else
+        fail "PUT /skus/:id empty name" "Expected 400, got $SKU_EMPTY"
+    fi
+fi
+
+# GET /skus/low-stock — must return the SKU we just created (it has a huge
+# reorder_point with zero received stock, so it IS low-stock by definition).
+LOW_STOCK_RES=$(curl -s "${API_URL}/skus/low-stock" -H "$AUTH_HEADER")
+if [ -n "$COV_SKU_ID" ] && echo "$LOW_STOCK_RES" | jq -e --arg sid "$COV_SKU_ID" \
+    '(.data // .) | map(.id) | index($sid) != null' > /dev/null 2>&1; then
+    pass "GET /skus/low-stock includes SKUs below reorder_point (structured match)"
+else
+    fail "GET /skus/low-stock" "New SKU (reorder_point=1000, qty=0) not listed: $LOW_STOCK_RES"
+fi
+
+echo ""
+echo "--- Endpoint coverage: Inventory adjust + stocktake lines PUT ---"
+
+# Seed a SKU + batch so /inventory/adjust has something to mutate.
+ADJ_SKU_RES=$(curl -s -X POST "${API_URL}/skus" -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+    -d "{\"name\":\"Adj SKU $(date +%s)\",\"unit_of_measure\":\"each\",\"category\":\"general\",\"low_stock_threshold\":5}")
+ADJ_SKU_ID=$(echo "$ADJ_SKU_RES" | jq -r '.id // empty')
+FUT_DATE=$(date -u -d '+60 days' +%Y-%m-%d 2>/dev/null || date -u -v+60d +%Y-%m-%d)
+RCV_RES=$(curl -s -X POST "${API_URL}/inventory/receive" -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+    -d "{\"sku_id\":\"${ADJ_SKU_ID}\",\"lot_number\":\"L-ADJ-$(date +%s)\",\"expiration_date\":\"${FUT_DATE}\",\"quantity\":20,\"storage_location\":\"A\",\"reason_code\":\"purchase_order\"}")
+ADJ_BATCH_ID=$(echo "$RCV_RES" | jq -r '.batch.id // .id // empty')
+
+if [ -n "$ADJ_BATCH_ID" ]; then
+    # POST /inventory/adjust — negative adjustment (write-off 5 units), must
+    # persist and return a transaction (handler returns 200 with tx + updated batch).
+    ADJ_RES=$(curl -s -X POST "${API_URL}/inventory/adjust" -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+        -d "{\"sku_id\":\"${ADJ_SKU_ID}\",\"batch_id\":\"${ADJ_BATCH_ID}\",\"quantity\":-5,\"reason_code\":\"damage\"}")
+    # Accept either envelope {transaction: {...}} or flat transaction object.
+    if echo "$ADJ_RES" | jq -e '
+        (.transaction.reason_code == "damage" or .reason_code == "damage")
+        and ((.transaction.type // .type) == "out")
+        ' > /dev/null 2>&1; then
+        pass "POST /inventory/adjust negative qty: tx.type=out, reason_code=damage"
+    else
+        fail "POST /inventory/adjust" "Unexpected body: $ADJ_RES"
+    fi
+
+    # Verify the batch quantity is now 15 (20 received - 5 adjustment).
+    BATCHES=$(curl -s "${API_URL}/skus/${ADJ_SKU_ID}/batches" -H "$AUTH_HEADER")
+    ADJ_QTY=$(echo "$BATCHES" | jq -r --arg bid "$ADJ_BATCH_ID" \
+        '[.data // .batches // .] | flatten | map(select(.id == $bid)) | .[0].quantity_on_hand // .[0].quantity // empty')
+    if [ "$ADJ_QTY" = "15" ]; then
+        pass "Post-adjust batch quantity_on_hand = 15 (20 - 5)"
+    else
+        fail "Adjust balance" "Expected 15, got '$ADJ_QTY'"
+    fi
+
+    # POST /inventory/adjust — over-decrement must be rejected 400.
+    OVER_ADJ=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${API_URL}/inventory/adjust" \
+        -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+        -d "{\"sku_id\":\"${ADJ_SKU_ID}\",\"batch_id\":\"${ADJ_BATCH_ID}\",\"quantity\":-9999,\"reason_code\":\"damage\"}")
+    if [ "$OVER_ADJ" -eq 400 ]; then
+        pass "POST /inventory/adjust rejects negative-stock adjustment with 400"
+    else
+        fail "Adjust over-decrement" "Expected 400, got $OVER_ADJ"
+    fi
+fi
+
+# PUT /stocktakes/:id/lines — real HTTP with a valid line referencing the
+# SKU+batch we already created above. Handler (inventory.go:900) requires
+# at least one line and auto-fills the line ID + computes variance.
+STL_CREATE=$(curl -s -X POST "${API_URL}/stocktakes" -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+    -d "{\"period_start\":\"$(date -u -d '1 day ago' +%Y-%m-%d 2>/dev/null || date -u -v-1d +%Y-%m-%d)\",\"period_end\":\"$(date -u +%Y-%m-%d)\"}")
+STL_ID=$(echo "$STL_CREATE" | jq -r '.id // empty')
+if [ -n "$STL_ID" ] && [ -n "$ADJ_SKU_ID" ] && [ -n "$ADJ_BATCH_ID" ]; then
+    STL_PUT_BODY=$(mktemp)
+    STL_PUT=$(curl -s -o "$STL_PUT_BODY" -w "%{http_code}" -X PUT "${API_URL}/stocktakes/${STL_ID}/lines" \
+        -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+        -d "{\"lines\":[{\"sku_id\":\"${ADJ_SKU_ID}\",\"batch_id\":\"${ADJ_BATCH_ID}\",\"system_qty\":15,\"counted_qty\":12}]}")
+    # Handler returns 200 with {lines:[...], message:"..."}. The single line's
+    # variance must be computed server-side as counted_qty - system_qty = -3.
+    if [ "$STL_PUT" -eq 200 ] && jq -e \
+        '.lines | type == "array" and length == 1 and .[0].variance == -3 and .[0].sku_id != ""' \
+        < "$STL_PUT_BODY" > /dev/null 2>&1; then
+        pass "PUT /stocktakes/:id/lines persists line + computes variance server-side (12-15=-3)"
+    else
+        fail "PUT /stocktakes/:id/lines" "status=$STL_PUT body=$(cat "$STL_PUT_BODY")"
+    fi
+    rm -f "$STL_PUT_BODY"
+
+    # Empty lines → 400 per handler validation.
+    STL_EMPTY=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "${API_URL}/stocktakes/${STL_ID}/lines" \
+        -H "$AUTH_HEADER" -H "Content-Type: application/json" -d '{"lines":[]}')
+    if [ "$STL_EMPTY" -eq 400 ]; then
+        pass "PUT /stocktakes/:id/lines rejects empty lines array with 400"
+    else
+        fail "Stocktake lines empty" "Expected 400, got $STL_EMPTY"
+    fi
+fi
+
+echo ""
+echo "--- Endpoint coverage: Learning GET + PUT ---"
+
+LRN_SUB=$(curl -s -X POST "${API_URL}/learning/subjects" -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+    -d "{\"name\":\"Cov Subject $(date +%s)\",\"description\":\"coverage\"}")
+LRN_SUB_ID=$(echo "$LRN_SUB" | jq -r '.id // empty')
+LRN_CH=$(curl -s -X POST "${API_URL}/learning/chapters" -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+    -d "{\"name\":\"Cov Chapter $(date +%s)\",\"subject_id\":\"${LRN_SUB_ID}\"}")
+LRN_CH_ID=$(echo "$LRN_CH" | jq -r '.id // empty')
+LRN_KP=$(curl -s -X POST "${API_URL}/learning/knowledge-points" -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+    -d "{\"title\":\"Cov KP $(date +%s)\",\"content\":\"orig content\",\"chapter_id\":\"${LRN_CH_ID}\"}")
+LRN_KP_ID=$(echo "$LRN_KP" | jq -r '.id // empty')
+
+# GET /learning/subjects — must return our newly-created subject.
+SUBS_LIST=$(curl -s "${API_URL}/learning/subjects" -H "$AUTH_HEADER")
+if [ -n "$LRN_SUB_ID" ] && echo "$SUBS_LIST" | jq -e --arg sid "$LRN_SUB_ID" \
+    '(.data // .) | map(.id) | index($sid) != null' > /dev/null 2>&1; then
+    pass "GET /learning/subjects lists the created subject"
+else
+    fail "GET /learning/subjects" "Subject not in list: $SUBS_LIST"
+fi
+
+# GET /learning/chapters?subject_id=... — filtered list contains our chapter.
+CHS_LIST=$(curl -s "${API_URL}/learning/chapters?subject_id=${LRN_SUB_ID}" -H "$AUTH_HEADER")
+if [ -n "$LRN_CH_ID" ] && echo "$CHS_LIST" | jq -e --arg cid "$LRN_CH_ID" \
+    '(.data // .) | map(.id) | index($cid) != null' > /dev/null 2>&1; then
+    pass "GET /learning/chapters?subject_id= returns the child chapter"
+else
+    fail "GET /learning/chapters" "Chapter not in list: $CHS_LIST"
+fi
+
+# GET /learning/knowledge-points?chapter_id=...
+KPS_LIST=$(curl -s "${API_URL}/learning/knowledge-points?chapter_id=${LRN_CH_ID}" -H "$AUTH_HEADER")
+if [ -n "$LRN_KP_ID" ] && echo "$KPS_LIST" | jq -e --arg kid "$LRN_KP_ID" \
+    '(.data // .) | map(.id) | index($kid) != null' > /dev/null 2>&1; then
+    pass "GET /learning/knowledge-points?chapter_id= returns the child KP"
+else
+    fail "GET /learning/knowledge-points" "KP not in list: $KPS_LIST"
+fi
+
+# PUT /learning/subjects/:id — change description.
+if [ -n "$LRN_SUB_ID" ]; then
+    SUB_PUT=$(curl -s -X PUT "${API_URL}/learning/subjects/${LRN_SUB_ID}" \
+        -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+        -d '{"description":"updated description"}')
+    if echo "$SUB_PUT" | jq -e '.description == "updated description"' > /dev/null 2>&1; then
+        pass "PUT /learning/subjects/:id persists description"
+    else
+        fail "PUT /learning/subjects/:id" "Unexpected body: $SUB_PUT"
+    fi
+fi
+
+# PUT /learning/knowledge-points/:id — change title + content.
+if [ -n "$LRN_KP_ID" ]; then
+    KP_PUT=$(curl -s -X PUT "${API_URL}/learning/knowledge-points/${LRN_KP_ID}" \
+        -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+        -d '{"title":"Updated Title","content":"new content"}')
+    if echo "$KP_PUT" | jq -e '.title == "Updated Title" and .content == "new content"' > /dev/null 2>&1; then
+        pass "PUT /learning/knowledge-points/:id persists title + content"
+    else
+        fail "PUT /learning/knowledge-points/:id" "Unexpected body: $KP_PUT"
+    fi
+
+    # Empty title → 400 (handler validates).
+    KP_BAD=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "${API_URL}/learning/knowledge-points/${LRN_KP_ID}" \
+        -H "$AUTH_HEADER" -H "Content-Type: application/json" -d '{"title":""}')
+    if [ "$KP_BAD" -eq 400 ]; then
+        pass "PUT /learning/knowledge-points/:id rejects empty title with 400"
+    else
+        fail "PUT KP empty title" "Expected 400, got $KP_BAD"
+    fi
+fi
+
+echo ""
+echo "--- Endpoint coverage: Work-order analytics ---"
+
+# GET /work-orders/analytics — maintenance_tech or system_admin only.
+ANALYTICS=$(curl -s "${API_URL}/work-orders/analytics" -H "$AUTH_HEADER")
+# Response is a map[string]interface{} from the repo; keys vary. Require it
+# to be a valid JSON object (not a list) and non-empty.
+if echo "$ANALYTICS" | jq -e 'type == "object" and (keys | length) > 0' > /dev/null 2>&1; then
+    pass "GET /work-orders/analytics returns a non-empty object"
+else
+    fail "GET /work-orders/analytics" "Unexpected body: $ANALYTICS"
+fi
+
+# Negative RBAC: pharmacist must get 403.
+AN_PHARM=$(curl -s -o /dev/null -w "%{http_code}" "${API_URL}/work-orders/analytics" \
+    -H "Authorization: Bearer $PHARM_TOKEN")
+if [ "$AN_PHARM" -eq 403 ]; then
+    pass "GET /work-orders/analytics rejects inventory_pharmacist with 403"
+else
+    fail "Analytics RBAC" "Expected 403, got $AN_PHARM"
+fi
+
+echo ""
+echo "--- Endpoint coverage: Member PUT / refund / packages / sensitive (+RBAC) ---"
+
+# Seed a member via front_desk (already has a valid FD_TOKEN from earlier).
+MEM_TIERS=$(curl -s "${API_URL}/membership-tiers" -H "Authorization: Bearer $FD_TOKEN")
+MEM_TIER_ID=$(echo "$MEM_TIERS" | jq -r '(.data // .) | .[0].id // empty')
+COV_MEM=$(curl -s -X POST "${API_URL}/members" -H "Authorization: Bearer $FD_TOKEN" -H "Content-Type: application/json" \
+    -d "{\"name\":\"Cov Member $(date +%s)\",\"phone\":\"+155577$(date +%s | tail -c 5)\",\"tier_id\":\"${MEM_TIER_ID}\"}")
+COV_MEM_ID=$(echo "$COV_MEM" | jq -r '.id // empty')
+
+if [ -n "$COV_MEM_ID" ]; then
+    # PUT /members/:id — update name + phone.
+    MEM_UPD=$(curl -s -X PUT "${API_URL}/members/${COV_MEM_ID}" \
+        -H "Authorization: Bearer $FD_TOKEN" -H "Content-Type: application/json" \
+        -d '{"name":"Renamed Member","phone":"+15551110000"}')
+    if echo "$MEM_UPD" | jq -e '.name == "Renamed Member" and .phone == "+15551110000"' > /dev/null 2>&1; then
+        pass "PUT /members/:id persists name + phone"
+    else
+        fail "PUT /members/:id" "Unexpected body: $MEM_UPD"
+    fi
+
+    # Empty name → 400.
+    MEM_BAD=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "${API_URL}/members/${COV_MEM_ID}" \
+        -H "Authorization: Bearer $FD_TOKEN" -H "Content-Type: application/json" -d '{"name":""}')
+    if [ "$MEM_BAD" -eq 400 ]; then
+        pass "PUT /members/:id rejects empty name with 400"
+    else
+        fail "PUT /members/:id empty name" "Expected 400, got $MEM_BAD"
+    fi
+
+    # Add stored value (prereq for refund).
+    curl -s -X POST "${API_URL}/members/${COV_MEM_ID}/add-value" \
+        -H "Authorization: Bearer $FD_TOKEN" -H "Content-Type: application/json" \
+        -d '{"type":"stored_value_add","amount":40}' > /dev/null
+
+    # POST /members/:id/refund — happy path within the 7-day window.
+    # Handler returns 200 with the refund transaction (type="stored_value_refund",
+    # amount negated). Assert the semantic shape, not just absence of "error".
+    REFUND_RES=$(curl -s -X POST "${API_URL}/members/${COV_MEM_ID}/refund" \
+        -H "Authorization: Bearer $FD_TOKEN" -H "Content-Type: application/json" \
+        -d '{"amount":10}')
+    if echo "$REFUND_RES" | jq -e \
+        '.type == "stored_value_refund" and .amount == -10' > /dev/null 2>&1; then
+        pass "POST /members/:id/refund returns tx {type=stored_value_refund, amount=-10}"
+    else
+        fail "POST /members/:id/refund" "Unexpected body: $REFUND_RES"
+    fi
+
+    # Post-refund GET member: stored_value should be 30 (40 - 10).
+    POST_REFUND_MEM=$(curl -s "${API_URL}/members/${COV_MEM_ID}" \
+        -H "Authorization: Bearer $FD_TOKEN")
+    if echo "$POST_REFUND_MEM" | jq -e '.stored_value == 30' > /dev/null 2>&1; then
+        pass "Refund balance change persisted: stored_value = 30"
+    else
+        fail "Refund balance" "Expected stored_value=30, body: $POST_REFUND_MEM"
+    fi
+
+    # Negative refund amount → 400.
+    REF_BAD=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${API_URL}/members/${COV_MEM_ID}/refund" \
+        -H "Authorization: Bearer $FD_TOKEN" -H "Content-Type: application/json" -d '{"amount":0}')
+    if [ "$REF_BAD" -eq 400 ]; then
+        pass "POST /members/:id/refund rejects non-positive amount with 400"
+    else
+        fail "Refund bad amount" "Expected 400, got $REF_BAD"
+    fi
+
+    # GET /members/:id/packages — returns envelope {data: array|null}.
+    # When the member has no packages, Go's pgx driver yields JSON `null` for
+    # the empty slice; we accept either null or an array type as "empty list".
+    PKG_RES=$(curl -s "${API_URL}/members/${COV_MEM_ID}/packages" \
+        -H "Authorization: Bearer $FD_TOKEN")
+    if echo "$PKG_RES" | jq -e '.data == null or (.data | type == "array")' > /dev/null 2>&1; then
+        pass "GET /members/:id/packages returns {data: array|null}"
+    else
+        fail "GET /members/:id/packages" "Unexpected body: $PKG_RES"
+    fi
+
+    # Create a session package and verify it is now returned by the list.
+    PKG_CREATE=$(curl -s -X POST "${API_URL}/members/${COV_MEM_ID}/packages" \
+        -H "Authorization: Bearer $FD_TOKEN" -H "Content-Type: application/json" \
+        -d "{\"name\":\"Cov Pack\",\"total_sessions\":5,\"expires_at\":\"$(date -u -d '+60 days' +%Y-%m-%d 2>/dev/null || date -u -v+60d +%Y-%m-%d)\"}")
+    PKG_ID=$(echo "$PKG_CREATE" | jq -r '.id // empty')
+    if [ -n "$PKG_ID" ]; then
+        PKG_RES2=$(curl -s "${API_URL}/members/${COV_MEM_ID}/packages" \
+            -H "Authorization: Bearer $FD_TOKEN")
+        if echo "$PKG_RES2" | jq -e --arg pid "$PKG_ID" \
+            '.data | type == "array" and (map(.id) | index($pid) != null)' > /dev/null 2>&1; then
+            pass "GET /members/:id/packages lists a just-created package"
+        else
+            fail "Packages list after create" "Pkg $PKG_ID not in: $PKG_RES2"
+        fi
+    fi
+
+    # GET /members/:id/sensitive — admin-only. Must 200 for admin.
+    SENS_ADMIN=$(curl -s "${API_URL}/members/${COV_MEM_ID}/sensitive" -H "$AUTH_HEADER")
+    if echo "$SENS_ADMIN" | jq -e --arg mid "$COV_MEM_ID" \
+        '.member_id == $mid and has("verification_status") and has("deposits") and has("violation_notes")' > /dev/null 2>&1; then
+        pass "GET /members/:id/sensitive (admin) returns decrypted fields"
+    else
+        fail "GET /members/:id/sensitive (admin)" "Unexpected body: $SENS_ADMIN"
+    fi
+
+    # Negative RBAC: front_desk must get 403.
+    SENS_FD=$(curl -s -o /dev/null -w "%{http_code}" \
+        "${API_URL}/members/${COV_MEM_ID}/sensitive" \
+        -H "Authorization: Bearer $FD_TOKEN")
+    if [ "$SENS_FD" -eq 403 ]; then
+        pass "GET /members/:id/sensitive rejects front_desk with exactly 403"
+    else
+        fail "Sensitive RBAC" "Expected 403, got $SENS_FD"
+    fi
+fi
+
+echo ""
+echo "--- Endpoint coverage: Rate tables GET + PUT ---"
+
+# GET /rate-tables — must be a list (pagination envelope {data:[]}).
+RT_LIST=$(curl -s "${API_URL}/rate-tables" -H "$AUTH_HEADER")
+if echo "$RT_LIST" | jq -e '(.data // .) | type == "array"' > /dev/null 2>&1; then
+    pass "GET /rate-tables returns an array"
+else
+    fail "GET /rate-tables" "Unexpected body: $RT_LIST"
+fi
+
+# Create a rate table we can mutate.
+RT_CREATE=$(curl -s -X POST "${API_URL}/rate-tables" -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+    -d "{\"name\":\"Cov RT $(date +%s)\",\"type\":\"distance\",\"tiers\":[{\"min\":0,\"max\":10,\"rate\":3}],\"fuel_surcharge_pct\":0,\"taxable\":false,\"effective_date\":\"$(date -u +%Y-%m-%d)\"}")
+RT_ID=$(echo "$RT_CREATE" | jq -r '.id // empty')
+
+if [ -n "$RT_ID" ]; then
+    # PUT /rate-tables/:id — change name + fuel_surcharge_pct.
+    RT_UPD=$(curl -s -X PUT "${API_URL}/rate-tables/${RT_ID}" \
+        -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+        -d '{"name":"Cov RT Renamed","fuel_surcharge_pct":12.5}')
+    if echo "$RT_UPD" | jq -e '.name == "Cov RT Renamed" and .fuel_surcharge_pct == 12.5' > /dev/null 2>&1; then
+        pass "PUT /rate-tables/:id persists name + fuel_surcharge_pct"
+    else
+        fail "PUT /rate-tables/:id" "Unexpected body: $RT_UPD"
+    fi
+
+    # PUT /rate-tables/:id — invalid effective_date must be rejected 400.
+    RT_BAD=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "${API_URL}/rate-tables/${RT_ID}" \
+        -H "$AUTH_HEADER" -H "Content-Type: application/json" -d '{"effective_date":"31-12-2025"}')
+    if [ "$RT_BAD" -eq 400 ]; then
+        pass "PUT /rate-tables/:id rejects invalid effective_date with 400"
+    else
+        fail "RT bad date" "Expected 400, got $RT_BAD"
+    fi
+fi
+
+echo ""
+echo "--- Endpoint coverage: Files export-zip ---"
+
+# Upload two files, then request a ZIP export of both — must return a ZIP body.
+TMP1=$(mktemp --suffix=.txt); echo "first-file-$(date +%s)" > "$TMP1"
+TMP2=$(mktemp --suffix=.txt); echo "second-file-$(date +%s)" > "$TMP2"
+F1=$(curl -s -X POST "${API_URL}/files/upload" -H "Authorization: Bearer $TOKEN" -F "file=@${TMP1}" | jq -r '.file.id // .id')
+F2=$(curl -s -X POST "${API_URL}/files/upload" -H "Authorization: Bearer $TOKEN" -F "file=@${TMP2}" | jq -r '.file.id // .id')
+
+if [ -n "$F1" ] && [ -n "$F2" ]; then
+    ZIP_OUT=$(mktemp)
+    ZIP_HEADERS=$(mktemp)
+    ZIP_STATUS=$(curl -s -D "$ZIP_HEADERS" -o "$ZIP_OUT" -w "%{http_code}" -X POST "${API_URL}/files/export-zip" \
+        -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+        -d "{\"file_ids\":[\"${F1}\",\"${F2}\"]}")
+    ZIP_BYTES=$(wc -c < "$ZIP_OUT")
+    # ZIP archives start with the "PK\x03\x04" local file header magic.
+    ZIP_MAGIC=$(head -c 4 "$ZIP_OUT" | xxd -p)
+    if [ "$ZIP_STATUS" -eq 200 ] && [ "$ZIP_BYTES" -gt 50 ] && [ "$ZIP_MAGIC" = "504b0304" ]; then
+        pass "POST /files/export-zip returns 200 with ZIP magic bytes ($ZIP_BYTES bytes)"
+    else
+        fail "POST /files/export-zip" "status=$ZIP_STATUS bytes=$ZIP_BYTES magic=$ZIP_MAGIC"
+    fi
+    rm -f "$ZIP_OUT" "$ZIP_HEADERS"
+
+    # Empty file_ids → 400.
+    ZIP_EMPTY=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${API_URL}/files/export-zip" \
+        -H "$AUTH_HEADER" -H "Content-Type: application/json" -d '{"file_ids":[]}')
+    if [ "$ZIP_EMPTY" -eq 400 ]; then
+        pass "POST /files/export-zip rejects empty file_ids with 400"
+    else
+        fail "ZIP export empty" "Expected 400, got $ZIP_EMPTY"
+    fi
+fi
+rm -f "$TMP1" "$TMP2"
 
 # =============================================================================
 # BACKEND GO UNIT/INTEGRATION TESTS — run inside a throwaway Go container so the

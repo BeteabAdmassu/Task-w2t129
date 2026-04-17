@@ -596,8 +596,13 @@ func (h *LearningHandler) ImportContent(c echo.Context) error {
 		Title:     title,
 		Content:   string(content),
 		Tags:      tags,
-		CreatedAt: now,
-		UpdatedAt: now,
+		// Classifications column is NOT NULL jsonb in the schema; an
+		// uninitialised json.RawMessage serialises as empty bytes, which pg
+		// rejects with "invalid input syntax for type json". Match the
+		// CreateKnowledgePoint handler and default to an empty JSON object.
+		Classifications: json.RawMessage("{}"),
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 
 	if err := h.repo.CreateKnowledgePoint(kp); err != nil {
